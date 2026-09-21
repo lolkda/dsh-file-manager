@@ -1,8 +1,24 @@
 {
-  "name": "@local/dsh-file-manager",
+  "name": "@lolkda/dsh-file-manager",
   "version": "0.1.4",
-  "private": true,
   "description": "Independent DSH file manager with explicit Host-local root grants",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "file-manager"
+  ],
+  "homepage": "https://github.com/lolkda/dsh-file-manager#readme",
+  "bugs": {
+    "url": "https://github.com/lolkda/dsh-file-manager/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lolkda/dsh-file-manager.git"
+  },
+  "license": "UNLICENSED",
+  "author": "lolkda",
   "type": "module",
   "engines": { "node": ">=24" },
   "os": ["linux"],
@@ -12,7 +28,8 @@
   "scripts": {
     "build:native": "cc -O2 -Wall -Wextra -Werror -std=c17 host/native/rename-no-replace.c -o host/native/rename-no-replace",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check index.js && node --check client.js && node --check host/manager.js && node --check host/io.js && node --check host/tasks.js && node --check host/transfers.js && node --check host/state.js && node --check host/watch.js && node --check host/requests.js && node --check host/atomic-rename.js && node --check host/line-endings.js"
+    "check": "node --check index.js && node --check client.js && node --check host/manager.js && node --check host/io.js && node --check host/tasks.js && node --check host/transfers.js && node --check host/state.js && node --check host/watch.js && node --check host/requests.js && node --check host/atomic-rename.js && node --check host/line-endings.js",
+    "prepublishOnly": "npm run check && npm run build:native && npm test"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.2",
@@ -24,6 +41,10 @@
     "react": "18.3.1",
     "react-test-renderer": "18.3.1",
     "yauzl": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },

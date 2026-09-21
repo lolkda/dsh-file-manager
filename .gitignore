@@ -9,6 +9,7 @@ host/native/rename-no-replace
 
 # Release snapshots (rebuild with `npm pack`)
 artifacts/
+*.tgz
 
 # Logs and editor/OS noise
 *.log

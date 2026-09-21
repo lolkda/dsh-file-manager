@@ -49,7 +49,7 @@ export async function loadClient(fetchImpl, options = {}) {
     crypto: webcrypto, setTimeout, clearTimeout, setInterval, clearInterval,
     TextEncoder, TextDecoder, Blob, FormData, ...options.globals,
   }, { filename: 'client.js' });
-  assert.equal(definition.id, '@local/dsh-file-manager');
+  assert.equal(definition.id, '@lolkda/dsh-file-manager');
   const client = definition.factory(name => {
     if (name === 'react') return React;
     if (name === '@deepseek-ai/dsh-client-ui-primitives') return uiBoundary;

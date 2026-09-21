@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify and package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The suite fails without the compiled helper, and the tarball is only
+      # installable when it ships one, so the helper is built before any test.
+      - name: Build the atomic rename helper
+        run: npm run build:native
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Pack the npm package
+        run: npm pack
+
+      - name: Assert the tarball carries every runtime entrypoint
+        run: |
+          set -euo pipefail
+          tarball=$(ls -1 ./*.tgz | head -n 1)
+          echo "Packing $tarball"
+          listing=$(tar -tzf "$tarball")
+          for required in \
+            package/index.js \
+            package/client.js \
+            package/cordis.patch.yml \
+            package/host/native/rename-no-replace
+          do
+            grep -qx "$required" <<<"$listing" \
+              || { echo "::error::$tarball is missing $required"; exit 1; }
+          done
+          echo "Verified $(grep -c . <<<"$listing") packed entries"
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: '*.tgz'
+          if-no-files-found: error

@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-file-manager',
+  id: '@lolkda/dsh-file-manager',
   factory(require) {
     const React = require('react');
     const h = React.createElement;

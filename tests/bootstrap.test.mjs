@@ -21,7 +21,7 @@ test('bundle declares independently installable Host and Client entrypoints', as
     if (error.code !== 'ENOENT') throw error;
   }
   assert.ok(manifest, 'the installable file-manager package is missing');
-  assert.equal(manifest.name, '@local/dsh-file-manager');
+  assert.equal(manifest.name, '@lolkda/dsh-file-manager');
   assert.equal(manifest.type, 'module');
   assert.equal(manifest.exports['.'], './index.js');
   assert.equal(manifest.exports['./client'], './client.js');
@@ -46,7 +46,7 @@ test('bundle patch installs a Host row without changing any Agent preset', async
   assert.ok(patch, 'the installable bundle patch is missing');
   assert.match(patch, /- insert:/);
   assert.match(patch, /id: local-file-manager/);
-  assert.match(patch, /name: '@local\/dsh-file-manager'/);
+  assert.match(patch, /name: '@lolkda\/dsh-file-manager'/);
   assert.doesNotMatch(patch, /agent-presets|sandbox|permission|replace:|remove:/);
 });
 

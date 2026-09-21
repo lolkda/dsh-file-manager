@@ -113,6 +113,12 @@ npm run check
 
 从 P0 升级时，旧的根登记仅存在于旧进程内存，可能需要重新添加一次。V1 的根和任务恢复记录使用 DSH storage domain，任务私有恢复证明不会被公共 DTO 剥掉。
 
+### 包身份改名（0.1.4 起）
+
+npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**，以支持标准发布。改名只触及**包身份**（npm 名、bundle patch 的 `name`、`client.js` 的模块 id）；**运行时命名空间与 unit id 保持 `local-file-manager` 不变**，否则会重演 0.1.0 的存储命名事故，并让已保存的设置与 storage domain 失联。`tests/package-identity.test.mjs` 锁住这条边界。
+
+因此当前 profile 里已安装的仍是旧名 `@local/dsh-file-manager`。它是磁盘上的一份独立副本，改名后**旧安装继续可用但不会自动跟随**；要采用新身份需用 `plugin_manager` 移除旧包再安装新包，结果为 `restart-required`，重启 DSH 并刷新页面才生效。
+
 ## 尚需真实页面验收
 
 1. 重启当前 DSH 并刷新原页面；打开“文件”，确认新建、编辑、复制粘贴、传输和任务区可用。
@@ -138,6 +144,30 @@ npm run check
 - 测试仅使用独立临时目录并清理，没有在用户真实目录中做破坏性实验。
 - TDD 技能引用的测试附录未随环境提供，已执行主文的 Red–Green–Refactor、真实行为断言和全套回归。
 
+## 发布流程
+
+仓库带有两条 GitHub Actions 工作流，均为 Node 24 / Linux x64：
+
+- `.github/workflows/ci.yml`：push 到 `main`、PR 与手动触发时执行 `npm ci` → `build:native` → `check` → `test` → `npm pack`，断言压缩包确实含 `index.js`、`client.js`、`cordis.patch.yml` 与 `host/native/rename-no-replace`，然后上传为构建产物。
+- `.github/workflows/release.yml`：推送 `v*` 标签时先校验 **tag、`package.json` 与 `index.js` 的 `VERSION` 三者一致**，通过后才发布到 npmjs.com。
+
+顺序不是随意的：`build:native` 必须早于 `npm test`，因为助手缺失时会有 3 项原子发布测试失败；而助手被 `.gitignore` 排除，全新 checkout 里并不存在。打包断言同样必要，否则会发出一个装上即坏的包。
+
+`npm publish` 会先执行 `prepublishOnly`（`check` + `build:native` + `test`），所以未经校验的构建无法到达 registry。`publishConfig` 把发布目标固定为 `https://registry.npmjs.org/`，避免本机指向镜像源时误发。
+
+发布步骤在**未配置 `NPM_TOKEN` 时自动跳过**并输出 notice，不会让工作流变红；`workflow_dispatch` 在分支上只做校验、不发布。首次发布前需在仓库 Secrets 中配置具有 `publish` 权限的 npm token。
+
+发布 `@lolkda/dsh-file-manager` 的步骤：
+
+```sh
+# 1. 同步版本号（两处必须一致，测试会守住）
+#    package.json 的 version 与 index.js 的 VERSION
+# 2. 提交并推送
+git commit -am "release 0.1.5" && git push
+# 3. 打标签触发发布
+git tag v0.1.5 && git push origin v0.1.5
+```
+
 ## License
 
-Private workspace bundle; not published to a public registry.
+UNLICENSED —— 保留全部权利。包会发布到 npmjs.com 公开 registry，但未授予他人使用、修改或再分发的许可。

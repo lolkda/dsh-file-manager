@@ -1,0 +1,76 @@
+name: Release
+
+# Publishing is driven by a version tag, so the tag, package.json and the wire
+# version are checked before anything reaches the registry.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    name: Verify the release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.agreement.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the tag, package.json and the wire version to agree
+        id: agreement
+        run: |
+          set -euo pipefail
+          version=$(node --input-type=module -e "import { readFileSync } from 'node:fs'; process.stdout.write(JSON.parse(readFileSync('package.json', 'utf8')).version)")
+          wire=$(node --input-type=module -e "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync('index.js', 'utf8').match(/const VERSION = '([^']+)'/)[1])")
+          echo "package.json: $version"
+          echo "index.js:     $wire"
+          if [ "$version" != "$wire" ]; then
+            echo "::error::index.js VERSION ($wire) disagrees with package.json ($version)"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version v$version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish to npm
+    needs: verify-version
+    # A manual run on a branch verifies the release without publishing it.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm publish` runs prepublishOnly (check, build:native, test), so an
+      # unverifiable build cannot reach the registry.
+      - name: Detect npm credentials
+        id: credentials
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NODE_AUTH_TOKEN}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Publish skipped::NPM_TOKEN is not configured for this repository, so v${{ needs.verify-version.outputs.version }} was verified but not published."
+          fi
+
+      - name: Publish @lolkda/dsh-file-manager
+        if: steps.credentials.outputs.available == 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
