@@ -55,6 +55,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # `npm publish` runs prepublishOnly (check, build:native, test); two of
+      # those suites need a real DSH, so install one and prove it resolves.
+      - name: Install the DSH runtime the integration suites resolve
+        env:
+          DSH_RUNTIME_VERSION: 0.1.6-alpha.2
+        run: |
+          npm install --global "@deepseek-ai/dsh@${DSH_RUNTIME_VERSION}"
+          echo "FILE_MANAGER_DSH_RUNTIME_ROOT=$(npm root -g)/@deepseek-ai/dsh" >> "$GITHUB_ENV"
+
+      - name: Assert the integration suites can resolve the DSH runtime
+        run: |
+          set -euo pipefail
+          test -f "${FILE_MANAGER_DSH_RUNTIME_ROOT}/package.json" || {
+            echo "::error::no DSH runtime at ${FILE_MANAGER_DSH_RUNTIME_ROOT}; refusing to publish behind a silently weakened gate"
+            exit 1
+          }
+
       # `npm publish` runs prepublishOnly (check, build:native, test), so an
       # unverifiable build cannot reach the registry.
       - name: Detect npm credentials

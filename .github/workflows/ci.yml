@@ -36,6 +36,25 @@ jobs:
       - name: Syntax check
         run: npm run check
 
+      # Two suites drive a real deployed DSH. Install one so they execute here
+      # rather than reporting the skip they use on a machine that has none.
+      - name: Install the DSH runtime the integration suites resolve
+        env:
+          DSH_RUNTIME_VERSION: 0.1.6-alpha.2
+        run: |
+          npm install --global "@deepseek-ai/dsh@${DSH_RUNTIME_VERSION}"
+          echo "FILE_MANAGER_DSH_RUNTIME_ROOT=$(npm root -g)/@deepseek-ai/dsh" >> "$GITHUB_ENV"
+
+      # Without this, a failed or misplaced install would let those suites skip
+      # silently and still leave the build green.
+      - name: Assert the integration suites can resolve the DSH runtime
+        run: |
+          set -euo pipefail
+          test -f "${FILE_MANAGER_DSH_RUNTIME_ROOT}/package.json" || {
+            echo "::error::no DSH runtime at ${FILE_MANAGER_DSH_RUNTIME_ROOT}; the integration suites would skip instead of running"
+            exit 1
+          }
+
       - name: Test
         run: npm test
 

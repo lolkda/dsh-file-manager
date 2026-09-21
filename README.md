@@ -105,6 +105,8 @@ npm run check
 
 `build:native` 使用系统 `cc` 显式编译。不要在助手缺失、不匹配或不支持时以普通 rename 代替。
 
+`tests/runtime-storage.test.mjs` 与 `tests/download-navigation.test.mjs` 针对**真实部署的 DSH**运行，默认从 `/usr/local/lib/node_modules/@deepseek-ai/dsh` 解析，可用 `FILE_MANAGER_DSH_RUNTIME_ROOT` 指向别的安装。找不到运行时时它们会**明确跳过这 12 项并打印原因**，不再让整个文件在导入期崩溃；CI 会安装 `@deepseek-ai/dsh@0.1.6-alpha.2` 并断言其可解析，因此 runner 上跑的是完整覆盖而不是静默跳过。
+
 ## 安装与升级
 
 使用 DSH 的 `plugin_manager` 安装本包或打包快照，不手工修改 profile 的安装结果。正式更新建议使用打包快照，避免继续依赖开发目录的动态链接。

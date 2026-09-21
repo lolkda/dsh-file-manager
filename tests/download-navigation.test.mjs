@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { createRequire } from 'node:module';
@@ -16,12 +17,18 @@ const fileManager = await import(process.env.FILE_MANAGER_TEST_PACKAGE_ROOT
   ? pathToFileURL(path.join(process.env.FILE_MANAGER_TEST_PACKAGE_ROOT, 'index.js')).href
   : new URL('../index.js', import.meta.url).href);
 
-const runtimeRequire = createRequire(path.join(process.env.FILE_MANAGER_DSH_RUNTIME_ROOT ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh', 'package.json'));
+// This suite drives the real deployed DSH runtime. A runner or a fresh clone that
+// has none cannot resolve it, so it reports an explicit skip instead of crashing
+// the whole file; set FILE_MANAGER_DSH_RUNTIME_ROOT to point at an installation.
+const runtimeRoot = process.env.FILE_MANAGER_DSH_RUNTIME_ROOT ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh';
+const runtimeAvailable = existsSync(path.join(runtimeRoot, 'package.json'));
+const skipWithoutRuntime = runtimeAvailable ? false : `no DSH runtime at ${runtimeRoot}; set FILE_MANAGER_DSH_RUNTIME_ROOT to run this suite against a real installation`;
+const runtimeRequire = runtimeAvailable ? createRequire(path.join(runtimeRoot, 'package.json')) : undefined;
 const runtime = name => import(pathToFileURL(runtimeRequire.resolve(name)).href);
-const [{ Context }, connectionPlugin, { BackendRegistry }, { JsonStorageBackend }, { DomainFacility }] = await Promise.all([
+const [{ Context } = {}, connectionPlugin, { BackendRegistry } = {}, { JsonStorageBackend } = {}, { DomainFacility } = {}] = runtimeAvailable ? await Promise.all([
   runtime('@deepseek-ai/cordis'), runtime('@deepseek-ai/dsh-client-connection'), runtime('@deepseek-ai/dsh-storage'),
   runtime('@deepseek-ai/dsh-storage-json'), runtime('@deepseek-ai/dsh-storage-domain'),
-]);
+]) : [];
 
 // A bounded test-only HTTP listener: no UI shell or second Harness server.
 // The deployed Connection plugin supplies its real auth, dispatch and HTTP bridge.
@@ -113,7 +120,7 @@ async function unzip(buffer) {
   return result;
 }
 
-test('a cookie-authenticated native GET traverses the deployed bridge and downloads exact file bytes', { timeout: 10000 }, async t => {
+test('a cookie-authenticated native GET traverses the deployed bridge and downloads exact file bytes', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t, { bytes: Buffer.alloc(256 * 1024, 0x61) });
   const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
   const response = await f.request(`/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' } });
@@ -128,7 +135,7 @@ test('a cookie-authenticated native GET traverses the deployed bridge and downlo
   assert.deepEqual(f.failures, []);
 });
 
-test('a native directory download preserves ZIP members and empty directories through the deployed bridge', { timeout: 10000 }, async t => {
+test('a native directory download preserves ZIP members and empty directories through the deployed bridge', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
   const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: '' });
   const response = await f.request(`/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`);
@@ -141,7 +148,7 @@ test('a native directory download preserves ZIP members and empty directories th
   assert.equal((await f.control({ op: 'transfers.get', taskId: task.id })).status, 'completed');
 });
 
-test('download request-mode fixes do not bypass signed-cookie and cross-site rejection', { timeout: 10000 }, async t => {
+test('download request-mode fixes do not bypass signed-cookie and cross-site rejection', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
   const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
   const relative = `/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`;
@@ -154,7 +161,7 @@ test('download request-mode fixes do not bypass signed-cookie and cross-site rej
   assert.equal((await f.control({ op: 'transfers.get', taskId: task.id })).status, 'queued');
 });
 
-test('closing task history through real HTTP requires authentication and never cancels a queued transfer', { timeout: 10000 }, async t => {
+test('closing task history through real HTTP requires authentication and never cancels a queued transfer', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
   const finished = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
   await (await f.request(`/api/file-manager/download?taskId=${finished.id}`)).arrayBuffer();
@@ -179,7 +186,7 @@ test('closing task history through real HTTP requires authentication and never c
   assert.deepEqual(f.failures, []);
 });
 
-test('text reads use the control route while large saves retain a streamed request body', { timeout: 10000 }, async t => {
+test('text reads use the control route while large saves retain a streamed request body', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t, { bytes: Buffer.from('original\n') });
   const snapshot = await f.control({ op: 'text.read', rootId: f.grant.id, path: f.filename });
   const text = 'large save without the carrier buffer cap\n'.repeat(8000);

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -11,12 +12,16 @@ import { createManager } from '../host/manager.js';
 import { apply } from '../index.js';
 
 // Resolve the deployed implementation, not a duplicate in-memory persistence fake.
-// Set FILE_MANAGER_DSH_RUNTIME_ROOT when testing another DSH installation.
-const runtimeRequire = createRequire(path.join(process.env.FILE_MANAGER_DSH_RUNTIME_ROOT ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh', 'package.json'));
+// Set FILE_MANAGER_DSH_RUNTIME_ROOT when testing another DSH installation. A machine
+// or runner without one reports an explicit skip instead of crashing the whole file.
+const runtimeRoot = process.env.FILE_MANAGER_DSH_RUNTIME_ROOT ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh';
+const runtimeAvailable = existsSync(path.join(runtimeRoot, 'package.json'));
+const skipWithoutRuntime = runtimeAvailable ? false : `no DSH runtime at ${runtimeRoot}; set FILE_MANAGER_DSH_RUNTIME_ROOT to run this suite against a real installation`;
+const runtimeRequire = runtimeAvailable ? createRequire(path.join(runtimeRoot, 'package.json')) : undefined;
 const runtime = name => import(pathToFileURL(runtimeRequire.resolve(name)).href);
-const [{ BackendRegistry }, { JsonStorageBackend }, { DomainFacility }] = await Promise.all([
+const [{ BackendRegistry } = {}, { JsonStorageBackend } = {}, { DomainFacility } = {}] = runtimeAvailable ? await Promise.all([
   runtime('@deepseek-ai/dsh-storage'), runtime('@deepseek-ai/dsh-storage-json'), runtime('@deepseek-ai/dsh-storage-domain'),
-]);
+]) : [];
 
 async function fixture(t) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-real-storage-'));
@@ -69,7 +74,7 @@ async function fixture(t) {
 
 const record = () => ({ id: 'move-1', operation: 'move', status: 'failed', items: [{ id: 'item-1', checkpoint: { targetParent: { rootId: 'root-1', path: '', identity: '1:2' }, removed: ['source/b'] } }] });
 
-test('history metadata rejects invalid flags and revisions before modifying deployed storage', async t => {
+test('history metadata rejects invalid flags and revisions before modifying deployed storage', { skip: skipWithoutRuntime }, async t => {
   const { boot } = await fixture(t);
   const instance = boot();
   const state = await openOperationState(instance.ctx);
@@ -89,7 +94,7 @@ test('history metadata rejects invalid flags and revisions before modifying depl
   await reopened.close();
 });
 
-test('closed history metadata survives cold JSON reopening without removing private recovery proofs', async t => {
+test('closed history metadata survives cold JSON reopening without removing private recovery proofs', { skip: skipWithoutRuntime }, async t => {
   const { boot } = await fixture(t);
   const first = boot();
   const state = await openOperationState(first.ctx);
@@ -106,7 +111,7 @@ test('closed history metadata survives cold JSON reopening without removing priv
   await reopened.close();
 });
 
-test('a dismissed real download remains dismissed after Host teardown and cold reopening', async t => {
+test('a dismissed real download remains dismissed after Host teardown and cold reopening', { skip: skipWithoutRuntime }, async t => {
   const { files, boot } = await fixture(t);
   let requestSerial = 0;
   const call = async (instance, payload) => {
@@ -137,7 +142,7 @@ test('a dismissed real download remains dismissed after Host teardown and cold r
   assert.equal((await call(second, { op: 'bootstrap' })).capabilities.taskHistory, true);
 });
 
-test('a failed journal initialization disables file operations without aborting Host startup', async t => {
+test('a failed journal initialization disables file operations without aborting Host startup', { skip: skipWithoutRuntime }, async t => {
   const { files, boot } = await fixture(t);
   const instance = boot();
   const originalOpen = instance.ctx.storageDomain.open.bind(instance.ctx.storageDomain);
@@ -161,7 +166,7 @@ test('a failed journal initialization disables file operations without aborting 
   assert.equal(instance.routes.has('/api/file-manager/upload'), false);
 });
 
-test('the deployed JSON storage accepts root metadata and restores an explicit grant after a cold reopen', async t => {
+test('the deployed JSON storage accepts root metadata and restores an explicit grant after a cold reopen', { skip: skipWithoutRuntime }, async t => {
   const { files, boot } = await fixture(t);
   const first = boot();
   let state;
@@ -180,7 +185,7 @@ test('the deployed JSON storage accepts root metadata and restores an explicit g
   await reopened.close();
 });
 
-test('the deployed JSON storage durably preserves operation checkpoints and transfer metadata', async t => {
+test('the deployed JSON storage durably preserves operation checkpoints and transfer metadata', { skip: skipWithoutRuntime }, async t => {
   const { boot } = await fixture(t);
   const first = boot();
   let state;
@@ -197,7 +202,7 @@ test('the deployed JSON storage durably preserves operation checkpoints and tran
   await reopened.close();
 });
 
-test('the full Host plugin mounts against deployed storage and persists its root through teardown and restart', async t => {
+test('the full Host plugin mounts against deployed storage and persists its root through teardown and restart', { skip: skipWithoutRuntime }, async t => {
   const { files, boot } = await fixture(t);
   const first = boot();
   await assert.doesNotReject(() => apply(first.ctx), 'a valid Host composition must not fail during storage initialization');
