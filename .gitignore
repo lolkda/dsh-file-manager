@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+.npm-cache/
+
+# Build output
+# The atomic no-replace rename helper is compiled from source:
+#   npm run build:native
+host/native/rename-no-replace
+
+# Release snapshots (rebuild with `npm pack`)
+artifacts/
+
+# Logs and editor/OS noise
+*.log
+.DS_Store

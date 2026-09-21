@@ -1,0 +1,3 @@
+- insert:
+    - id: local-file-manager
+      name: '@local/dsh-file-manager'
