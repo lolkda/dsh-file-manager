@@ -150,7 +150,7 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 
 仓库带有两条 GitHub Actions 工作流，均为 Node 24 / Linux x64：
 
-- `.github/workflows/ci.yml`：push 到 `main`、PR 与手动触发时执行 `npm ci` → `build:native` → `check` → `test` → `npm pack`，断言压缩包确实含 `index.js`、`client.js`、`cordis.patch.yml` 与 `host/native/rename-no-replace`，然后上传为构建产物。
+- `.github/workflows/ci.yml`：push 到 `main`、PR 与手动触发时执行 `npm ci` → `build:native` → `check` → 安装 DSH 运行时 → `test` → `npm pack`，断言压缩包确实含 `index.js`、`client.js`、`cordis.patch.yml` 与 `host/native/rename-no-replace`，然后上传为构建产物。上传步骤为**尽力而为**（`continue-on-error`）：Actions 产物存储有配额，配额耗尽不应让每次运行变红，真正的闸门是打包与断言。
 - `.github/workflows/release.yml`：推送 `v*` 标签时先校验 **tag、`package.json` 与 `index.js` 的 `VERSION` 三者一致**，通过后才发布到 npmjs.com。
 
 顺序不是随意的：`build:native` 必须早于 `npm test`，因为助手缺失时会有 3 项原子发布测试失败；而助手被 `.gitignore` 排除，全新 checkout 里并不存在。打包断言同样必要，否则会发出一个装上即坏的包。

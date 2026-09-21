@@ -78,7 +78,12 @@ jobs:
           done
           echo "Verified $(grep -c . <<<"$listing") packed entries"
 
+      # Best effort only: GitHub Actions artifact storage is quota-limited, and a
+      # quota-exhausted account must not make every run red. The pack and
+      # assertion steps above are the real gate; this step just publishes the
+      # verified tarball when the account has room for it.
       - name: Upload the package
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: npm-package
