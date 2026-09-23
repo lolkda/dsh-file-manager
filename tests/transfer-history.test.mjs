@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
-import { createTransferService } from '../host/transfers.js';
+import { createManager } from '../dist/host/manager.js';
+import { createTransferService } from '../dist/host/transfers.js';
 
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
@@ -40,8 +40,8 @@ async function fixture(t, options = {}) {
 }
 
 const upload = (fixture, items = [{ path: 'file.bin', kind: 'file', size: 4 }]) => fixture.service.begin({ direction: 'upload', rootId: fixture.grant.id, path: '', items });
-const uploadRequest = (task, item = task.items[0], body = 'data', signal) => new Request(`http://local/api/file-manager/upload?taskId=${task.id}&itemId=${item.id}`, { method: 'POST', body, duplex: 'half', signal });
-const downloadRequest = task => new Request(`http://local/api/file-manager/download?taskId=${task.id}`);
+const uploadRequest = (task, item = task.items[0], body = 'data', signal) => new Request(`http://local/api/file-manager/v2/upload?taskId=${task.id}&itemId=${item.id}`, { method: 'POST', body, duplex: 'half', signal });
+const downloadRequest = task => new Request(`http://local/api/file-manager/v2/download?taskId=${task.id}`);
 const requireDismiss = service => assert.equal(typeof service.dismiss, 'function', 'transfer history dismissal is not implemented');
 const hide = (service, task) => service.dismiss({ taskId: task.id, expectedHistoryRevision: task.historyRevision });
 async function completedUpload(f) {

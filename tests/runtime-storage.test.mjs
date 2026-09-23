@@ -7,9 +7,9 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { openOperationState, openProfileState } from '../host/state.js';
-import { createManager } from '../host/manager.js';
-import { apply } from '../index.js';
+import { openOperationState, openProfileState } from '../dist/host/state.js';
+import { createManager } from '../dist/host/manager.js';
+import { apply } from '../dist/index.js';
 
 // Resolve the deployed implementation, not a duplicate in-memory persistence fake.
 // Set FILE_MANAGER_DSH_RUNTIME_ROOT when testing another DSH installation. A machine
@@ -115,7 +115,8 @@ test('a dismissed real download remains dismissed after Host teardown and cold r
   const { files, boot } = await fixture(t);
   let requestSerial = 0;
   const call = async (instance, payload) => {
-    const response = await instance.routes.get('/api/file-manager/control').fetch(new Request('http://localhost/api/file-manager/control', {
+    const route = ['tasks.start', 'tasks.retry', 'transfers.begin'].includes(payload.op) ? 'manifest' : 'control';
+    const response = await instance.routes.get(`/api/file-manager/v2/${route}`).fetch(new Request(`http://localhost/api/file-manager/v2/${route}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: `history-runtime-${++requestSerial}`, ...payload }),
     }));
     const body = await response.json();
@@ -126,7 +127,7 @@ test('a dismissed real download remains dismissed after Host teardown and cold r
   const grant = await call(first, { op: 'roots.add', path: files });
   await call(first, { op: 'entries.create-file', rootId: grant.id, path: 'retained.txt' });
   const task = await call(first, { op: 'transfers.begin', direction: 'download', rootId: grant.id, path: 'retained.txt' });
-  const response = await first.routes.get('/api/file-manager/download').fetch(new Request(`http://localhost/api/file-manager/download?taskId=${task.id}`));
+  const response = await first.routes.get('/api/file-manager/v2/download').fetch(new Request(`http://localhost/api/file-manager/v2/download?taskId=${task.id}`));
   assert.equal(response.status, 200);
   await response.arrayBuffer();
   const closed = await call(first, { op: 'activities.dismiss', items: [{ kind: 'transfer', taskId: task.id, expectedHistoryRevision: 0 }] });
@@ -154,16 +155,31 @@ test('a failed journal initialization disables file operations without aborting 
     return originalOpen(spec);
   };
   await assert.doesNotReject(() => apply(instance.ctx), 'optional file management storage failure must not abort the whole Host');
-  assert.equal(instance.ctx.storageDomain.get('local_file_manager'), undefined, 'the already opened root domain must be closed');
-  const control = instance.routes.get('/api/file-manager/control');
-  assert.ok(control, 'the unavailable state must remain observable');
-  for (const op of ['bootstrap', 'roots.add']) {
-    const response = await control.fetch(new Request('http://localhost/api/file-manager/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op, path: files, requestId: 'failed-storage-request' }) }));
-    assert.equal(response.status, 503);
-    assert.equal((await response.json()).error.code, 'FILE_MANAGER_UNAVAILABLE');
-  }
+  assert.ok(instance.ctx.storageDomain.get('local_file_manager'), 'trustworthy root grants keep serving reads while the journal is unavailable');
+  const control = instance.routes.get('/api/file-manager/v2/control');
+  assert.ok(control, 'the degraded state must remain observable');
+  const send = async (op, extra = {}) => {
+    const response = await control.fetch(new Request('http://localhost/api/file-manager/v2/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op, path: files, requestId: 'failed-storage-request', ...extra }) }));
+    return { status: response.status, body: await response.json() };
+  };
+  // The client must be able to explain the degradation, so bootstrap still answers.
+  const bootstrap = await send('bootstrap');
+  assert.equal(bootstrap.status, 200, JSON.stringify(bootstrap.body));
+  assert.deepEqual(bootstrap.body.value.degraded, {
+    scope: 'operations', code: 'malformed-medium',
+    message: 'The operation journal is unavailable; the file manager is read-only.', readOnly: true,
+  });
+  assert.equal(bootstrap.body.value.capabilities.write, false);
+  assert.equal(bootstrap.body.value.capabilities.tasks, false);
+  // Writes are refused with the degradation scope, and the journal is never reset.
+  const refused = await send('roots.add');
+  assert.equal(refused.status, 503);
+  assert.equal(refused.body.error.code, 'FILE_MANAGER_UNAVAILABLE');
+  assert.equal(refused.body.error.details.scope, 'operations');
   assert.ok(messages.some(message => String(message).includes('malformed-medium')));
-  assert.equal(instance.routes.has('/api/file-manager/upload'), false);
+  assert.equal(instance.routes.has('/api/file-manager/v2/upload'), true, 'the v2 surface stays mounted');
+  const upload = await instance.routes.get('/api/file-manager/v2/upload').fetch(new Request('http://localhost/api/file-manager/v2/upload?taskId=missing&itemId=missing', { method: 'POST', body: 'x' }));
+  assert.equal(upload.status, 503, 'transfers are not composed while the journal is unavailable');
 });
 
 test('the deployed JSON storage accepts root metadata and restores an explicit grant after a cold reopen', { skip: skipWithoutRuntime }, async t => {
@@ -206,9 +222,9 @@ test('the full Host plugin mounts against deployed storage and persists its root
   const { files, boot } = await fixture(t);
   const first = boot();
   await assert.doesNotReject(() => apply(first.ctx), 'a valid Host composition must not fail during storage initialization');
-  assert.equal(first.routes.size, 5);
+  assert.equal(first.routes.size, 6, 'the frozen v2 route table registers six routes');
   const call = async (instance, payload) => {
-    const response = await instance.routes.get('/api/file-manager/control').fetch(new Request('http://localhost/api/file-manager/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }));
+    const response = await instance.routes.get('/api/file-manager/v2/control').fetch(new Request('http://localhost/api/file-manager/v2/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }));
     const body = await response.json();
     assert.equal(response.status, 200, JSON.stringify(body));
     return body.value;

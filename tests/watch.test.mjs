@@ -4,13 +4,13 @@ import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
-import * as plugin from '../index.js';
+import { createManager } from '../dist/host/manager.js';
+import * as plugin from '../dist/index.js';
 
 async function watchModule() {
   let module;
-  try { module = await import('../host/watch.js'); }
-  catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND' || error.url !== new URL('../host/watch.js', import.meta.url).href) throw error; }
+  try { module = await import('../dist/host/watch.js'); }
+  catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND' || error.url !== new URL('../dist/host/watch.js', import.meta.url).href) throw error; }
   assert.equal(typeof module?.createWatchService, 'function', 'the OS watch service is missing');
   return module;
 }
@@ -129,7 +129,7 @@ test('the event response carries OS invalidations and task events with per-conne
   const hub = module.createEventHub();
   const controller = new AbortController();
   const handler = plugin.createEventHandler({ watcher: service, events: hub });
-  const response = await handler(new Request('http://localhost/api/file-manager/events', { method: 'POST', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targets: [target] }) }));
+  const response = await handler(new Request('http://localhost/api/file-manager/v2/events', { method: 'POST', signal: controller.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targets: [target] }) }));
   assert.equal(response.headers.get('content-type'), 'text/event-stream; charset=utf-8');
   const reader = response.body.getReader();
   const deadline = setTimeout(() => controller.abort(), 2500);
@@ -153,7 +153,7 @@ test('an overloaded event consumer receives an explicit resynchronization frame'
   const { service } = await fixture(t);
   const hub = module.createEventHub();
   const handler = plugin.createEventHandler({ watcher: service, events: hub, maxQueuedEvents: 4 });
-  const response = await handler(new Request('http://localhost/api/file-manager/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targets: [] }) }));
+  const response = await handler(new Request('http://localhost/api/file-manager/v2/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targets: [] }) }));
   const reader = response.body.getReader();
   try {
     await readEvent(reader, event => event.kind === 'ready');

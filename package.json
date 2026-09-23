@@ -1,6 +1,6 @@
 {
   "name": "@lolkda/dsh-file-manager",
-  "version": "0.1.4",
+  "version": "0.2.8",
   "description": "Independent DSH file manager with explicit Host-local root grants",
   "keywords": [
     "dsh",
@@ -20,15 +20,38 @@
   "license": "UNLICENSED",
   "author": "lolkda",
   "type": "module",
-  "engines": { "node": ">=24" },
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "exports": { ".": "./index.js", "./client": "./client.js" },
-  "files": ["index.js", "client.js", "host", "contracts", "tests", "cordis.patch.yml", "README.md", "SPEC.md"],
+  "engines": {
+    "node": ">=24"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "host",
+    "tests",
+    "cordis.patch.yml",
+    "README.md",
+    "SPEC.md"
+  ],
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:host": "tsc -p tsconfig.host.json",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit --declaration false --declarationMap false --sourceMap false && tsc -p tsconfig.client.json",
+    "check:dist": "node scripts/check-dist.mjs",
+    "pack:check": "node scripts/pack-check.mjs",
     "build:native": "cc -O2 -Wall -Wextra -Werror -std=c17 host/native/rename-no-replace.c -o host/native/rename-no-replace",
+    "pretest": "node scripts/require-build.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check index.js && node --check client.js && node --check host/manager.js && node --check host/io.js && node --check host/tasks.js && node --check host/transfers.js && node --check host/state.js && node --check host/watch.js && node --check host/requests.js && node --check host/atomic-rename.js && node --check host/line-endings.js",
+    "check": "npm run typecheck && npm run build && npm run check:dist",
     "prepublishOnly": "npm run check && npm run build:native && npm test"
   },
   "dependencies": {
@@ -38,8 +61,12 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "^18.3.31",
+    "esbuild": "^0.28.2",
     "react": "18.3.1",
     "react-test-renderer": "18.3.1",
+    "typescript": "^7.0.2",
     "yauzl": "^3.0.0"
   },
   "publishConfig": {
@@ -47,12 +74,18 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation"],
-      "external": ["@deepseek-ai/dsh-client-ui-primitives"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
     }
   }
 }

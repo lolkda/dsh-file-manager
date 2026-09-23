@@ -33,8 +33,18 @@ jobs:
       - name: Build the atomic rename helper
         run: npm run build:native
 
-      - name: Syntax check
+      - name: Type-check, build and syntax-check the shipped artifacts
         run: npm run check
+
+      # The Client half is only ever loaded as the wrapped browser module the
+      # harness reads verbatim, so its identity is asserted against package.json
+      # rather than trusted to the bundler.
+      - name: Assert the built Client module registers the package identity
+        run: |
+          set -euo pipefail
+          name=$(node --input-type=module -e "import { readFileSync } from 'node:fs'; process.stdout.write(JSON.parse(readFileSync('package.json','utf8')).name)")
+          grep -q "__ModuleLoader__.load({" dist/client.js || { echo "::error::dist/client.js is not a ModuleLoader module"; exit 1; }
+          grep -q "id: \"$name\"" dist/client.js || { echo "::error::dist/client.js does not register $name"; exit 1; }
 
       # Two suites drive a real deployed DSH. Install one so they execute here
       # rather than reporting the skip they use on a machine that has none.
@@ -68,8 +78,9 @@ jobs:
           echo "Packing $tarball"
           listing=$(tar -tzf "$tarball")
           for required in \
-            package/index.js \
-            package/client.js \
+            package/dist/index.js \
+            package/dist/client.js \
+            package/dist/host/scheduler.js \
             package/cordis.patch.yml \
             package/host/native/rename-no-replace
           do

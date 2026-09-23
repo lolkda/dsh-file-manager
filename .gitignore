@@ -14,3 +14,7 @@ artifacts/
 # Logs and editor/OS noise
 *.log
 .DS_Store
+
+# Compiled output (rebuild with `npm run build`)
+dist/
+*.tsbuildinfo

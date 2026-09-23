@@ -3,10 +3,12 @@ import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile }
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
 
-const tasksModule = await import('../host/tasks.js').catch(error => {
+const tasksModule = await import('../dist/host/tasks.js').catch(error => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
   return {};
 });
@@ -18,7 +20,7 @@ async function fixture(t, options = {}) {
   const source = path.join(base, 'source');
   const target = path.join(base, 'target');
   await mkdir(source); await mkdir(target);
-  const manager = createManager();
+  const manager = createManager(options.managerOptions);
   const sourceRoot = await manager.addRoot({ path: source });
   const targetRoot = await manager.addRoot({ path: target });
   let service;
@@ -564,4 +566,41 @@ test('EXDEV cleanup detects source changes after publication and retry never ove
   assert.equal(retried.items[0].status, 'failed');
   assert.equal(await readFile(path.join(f.source, 'file'), 'utf8'), 'external source');
   assert.equal(await readFile(path.join(volume.target, 'file'), 'utf8'), 'external target');
+});
+
+/** `rchar` counts every byte this process read, including the ones the engine reads itself. */
+function readCharacters() {
+  const match = /rchar:\s*(\d+)/.exec(readFileSync('/proc/self/io', 'utf8'));
+  assert.ok(match, 'this measurement needs /proc/self/io');
+  return Number(match[1]);
+}
+
+test('a manifest inside the verification budget copies and stays content-bound to the source digest', { timeout: 120000 }, async t => {
+  const size = 16 * 1024 * 1024;
+  const f = await fixture(t, { managerOptions: { maxVerificationBytes: 32 * 1024 * 1024 } });
+  const payload = Buffer.alloc(size, 0x5a);
+  await writeFile(path.join(f.source, 'big.bin'), payload);
+  const task = await f.wait((await f.start([await f.item('big.bin')])).id);
+  assert.equal(task.status, 'completed', JSON.stringify(task.items.map(item => item.error ?? item.status)));
+  const digest = createHash('sha256').update(payload).digest('hex');
+  assert.equal(createHash('sha256').update(await readFile(path.join(f.target, 'big.bin'))).digest('hex'), digest, 'the published bytes must be the source bytes');
+  const published = await f.manager.io.stat({ rootId: f.targetRoot.id, path: 'big.bin' });
+  assert.ok(published.version.endsWith(`:${digest}`), 'the published entry must carry the verified content digest');
+});
+
+test('a manifest above the verification budget is refused before the content is read', { timeout: 120000 }, async t => {
+  // Each selection fits the budget on its own; the operation manifest as a whole does not.
+  const each = 2 * 1024 * 1024;
+  const names = ['a.bin', 'b.bin', 'c.bin'];
+  const f = await fixture(t, { managerOptions: { maxVerificationBytes: 4 * 1024 * 1024 } });
+  for (const name of names) await writeFile(path.join(f.source, name), Buffer.alloc(each, 0x11));
+  const items = [];
+  for (const name of names) items.push(await f.item(name));
+  const before = readCharacters();
+  const task = await f.wait((await f.start(items)).id);
+  const read = readCharacters() - before;
+  assert.equal(task.status, 'failed');
+  assert.ok(task.items.every(item => item.error?.code === 'TOO_LARGE'), JSON.stringify(task.items.map(item => item.error?.code ?? item.status)));
+  assert.deepEqual(await readdir(f.target), [], 'a refused operation must not publish anything');
+  assert.ok(read < each, `planning must not read the content: expected far less than ${each * names.length} bytes, saw ${read}`);
 });

@@ -101,14 +101,14 @@ test('the directory form adds an explicit root without changing existing grants'
 test('all text snapshots use the control POST rather than the unsupported text GET route', async t => {
   const view = await setup(t);
   await view.openHello();
-  assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/text') && item.init.method === 'GET'), false);
-  assert.ok(view.requests.some(item => item.url === '/api/file-manager/control' && JSON.parse(item.init.body).op === 'text.read'));
+  assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/v2/text') && item.init.method === 'GET'), false);
+  assert.ok(view.requests.some(item => item.url === '/api/file-manager/v2/control' && JSON.parse(item.init.body).op === 'text.read'));
   assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '<script>not executable</script>\n你好');
   await view.click({ 'data-fm-action': 'edit' });
   act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'verified after save' } }));
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'verified after save');
-  assert.ok(view.requests.filter(item => item.url === '/api/file-manager/control' && JSON.parse(item.init.body).op === 'text.read').length >= 2, 'save receipt verification also requires the working control snapshot route');
+  assert.ok(view.requests.filter(item => item.url === '/api/file-manager/v2/control' && JSON.parse(item.init.body).op === 'text.read').length >= 2, 'save receipt verification also requires the working control snapshot route');
   assert.equal(nodes(view.renderer, { 'data-fm-document-state': 'clean' }).length, 1);
 });
 
@@ -121,7 +121,7 @@ test('editing and saving through the text route preserves UTF-8 BOM and CRLF', a
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '\ufeff已修改\r\n第二行\r\n');
   assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, '已修改\n第二行\n');
   assert.equal(node(view.renderer, { 'data-fm-document-state': 'clean' }).children.length > 0, true);
-  const request = view.requests.find(item => item.url === '/api/file-manager/text' && item.init.method === 'POST' && JSON.parse(item.init.body).op === 'save');
+  const request = view.requests.find(item => item.url === '/api/file-manager/v2/text' && item.init.method === 'POST' && JSON.parse(item.init.body).op === 'save');
   const payload = JSON.parse(request.init.body);
   assert.equal(payload.op, 'save');
   assert.equal(typeof payload.requestId, 'string');
@@ -201,7 +201,7 @@ test('typing while a save is in flight remains dirty after its receipt arrives',
   const saving = new Promise(resolve => { started = resolve; });
   const view = await setup(t, { intercept: async (url, init, route) => {
     const response = await route(url, init);
-    if (url === '/api/file-manager/text' && init.method === 'POST' && JSON.parse(init.body).op === 'save') { started(); await gate; }
+    if (url === '/api/file-manager/v2/text' && init.method === 'POST' && JSON.parse(init.body).op === 'save') { started(); await gate; }
     return response;
   } });
   await view.openHello();
@@ -230,8 +230,8 @@ test('a Host without the write capability cannot expose active mutation controls
   await view.openHello();
   const edit = nodes(view.renderer, { 'data-fm-action': 'edit' });
   assert.ok(edit.length === 0 || edit[0].props.disabled);
-  assert.equal(view.requests.some(item => item.init.method === 'POST' && item.url === '/api/file-manager/text'), false);
-  assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/text')), false, 'old read-only Hosts have only the control route');
+  assert.equal(view.requests.some(item => item.init.method === 'POST' && item.url === '/api/file-manager/v2/text'), false);
+  assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/v2/text')), false, 'old read-only Hosts have only the control route');
   assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '<script>not executable</script>\n你好');
 });
 
@@ -400,7 +400,10 @@ test('permanent deletion requires acknowledgement and cancellation never deletes
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'delete' });
-  assert.ok(textOf(node(view.renderer, { 'data-fm-delete-preview': true })).includes('folder/hello.txt'));
+  // The dialog deliberately does not echo the manifest: the server-held plan
+  // still binds every version, so acknowledgement and the confirmation button
+  // remain the only gate (asserted below), not a review of a printed list.
+  assert.equal(nodes(view.renderer, { 'data-fm-delete-preview': true }).length, 0, 'the manifest must not be listed in the dialog');
   assert.equal(node(view.renderer, { 'data-fm-action': 'delete-confirm' }).props.disabled, true);
   await view.click({ 'data-fm-action': 'delete-confirm' });
   await access(path.join(view.root, 'folder/hello.txt'));
@@ -462,7 +465,8 @@ test('an overwrite paste binds the reviewed destination version and refuses a la
   await view.openHello(); await view.click({ 'data-fm-action': 'copy' });
   await view.click({ 'data-fm-root': true });
   await view.click({ 'data-fm-action': 'paste' });
-  act(() => node(view.renderer, { 'data-fm-conflict-policy': 0 }).props.onChange({ target: { value: 'overwrite' } }));
+  await view.click({ 'data-fm-conflict-policy': 0 });
+  await view.click({ role: 'menuitem', 'data-menu-item': 'overwrite' });
   await writeFile(path.join(view.root, 'hello.txt'), 'replacement destination');
   await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list();
@@ -478,9 +482,10 @@ test('directory paste offers skip or rename but never an implicit overwrite merg
   act(() => node(view.renderer, { 'aria-label': '选择: folder' }).props.onChange({ target: { checked: true } }));
   await view.click({ 'data-fm-action': 'copy' });
   await view.click({ 'data-fm-action': 'paste' });
-  const policy = node(view.renderer, { 'data-fm-conflict-policy': 0 });
-  assert.equal(policy.findAllByType('option').some(option => option.props.value === 'overwrite'), false);
-  act(() => policy.props.onChange({ target: { value: 'rename' } }));
+  await view.click({ 'data-fm-conflict-policy': 0 });
+  const policy = view.renderer.root.findByType(uiBoundary.Menu);
+  assert.equal(policy.props.items.some(option => option.id === 'overwrite'), false);
+  await view.click({ role: 'menuitem', 'data-menu-item': 'rename' });
   act(() => node(view.renderer, { 'data-fm-paste-name': 0 }).props.onChange({ target: { value: 'folder-copy' } }));
   await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list(); await view.waitForTask(task.id);
@@ -616,8 +621,8 @@ test('download uses the native streaming URL rather than buffering a file into t
   assert.ok(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'entries.stat' && JSON.parse(item.init.body).path === 'folder/hello.txt'), 'download must acquire a strong stat snapshot rather than trusting the listing token');
   assert.equal(JSON.parse(request.init.body).expectedVersion, (await view.manager.io.stat({ rootId: view.manager.listRoots()[0].id, path: 'folder/hello.txt' })).version, 'download selection must use an opaque strong stat version');
   const link = node(view.renderer, { 'data-fm-download': true });
-  assert.ok(link.props.href.startsWith('/api/file-manager/download?taskId='));
-  assert.equal(view.requests.some(request => request.url.startsWith('/api/file-manager/download')), false);
+  assert.ok(link.props.href.startsWith('/api/file-manager/v2/download?taskId='));
+  assert.equal(view.requests.some(request => request.url.startsWith('/api/file-manager/v2/download')), false);
   assert.ok(textOf(node(view.renderer, { 'data-fm-download-note': true })).includes('浏览器'));
 });
 
@@ -716,7 +721,7 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
   const reread = new Promise(resolve => { observed = resolve; });
   let changed = false;
   const view = await setup(t, { intercept: async (url, init, route) => {
-    if (url === '/api/file-manager/events') {
+    if (url === '/api/file-manager/v2/events') {
       const stream = { signal: init.signal, cancelled: false };
       const body = new ReadableStream({ start(controller) { stream.controller = controller; }, cancel() { stream.cancelled = true; } });
       streams.push(stream);
@@ -724,7 +729,7 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
     }
     const response = await route(url, init);
     if (init.body && JSON.parse(init.body).op === 'bootstrap') { const result = await response.json(); result.value.capabilities.watch = true; return new Response(JSON.stringify(result)); }
-    if (changed && url === '/api/file-manager/control' && JSON.parse(init.body).op === 'text.read') observed();
+    if (changed && url === '/api/file-manager/v2/control' && JSON.parse(init.body).op === 'text.read') observed();
     return response;
   } });
   await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
@@ -747,7 +752,7 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
 
 test('a closed event connection is shown as disconnected instead of claiming live observation', async t => {
   const view = await setup(t, { intercept: async (url, init, route) => {
-    if (url === '/api/file-manager/events') return new Response(new ReadableStream({ start(controller) { controller.close(); } }));
+    if (url === '/api/file-manager/v2/events') return new Response(new ReadableStream({ start(controller) { controller.close(); } }));
     const response = await route(url, init);
     if (init.body && JSON.parse(init.body).op === 'bootstrap') { const result = await response.json(); result.value.capabilities.watch = true; return new Response(JSON.stringify(result)); }
     return response;
@@ -796,4 +801,173 @@ test('opening a file displays literal text without executing HTML or sending a p
   await view.openHello();
   assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '<script>not executable</script>\n你好');
   assert.equal(view.renderer.root.findAllByType('script').length, 0);
+});
+
+/* ------------------------------------------------------------------ *
+ * Targeted regressions for the interaction defects fixed by this port.
+ * ------------------------------------------------------------------ */
+
+const controlBody = init => JSON.parse(String(init.body ?? '{}'));
+const envelope = value => new Response(JSON.stringify({ ok: true, value }), { headers: { 'content-type': 'application/json' } });
+const entry = (name, kind = 'file') => ({ name, path: name, kind, size: 3, modifiedAt: '2024-01-01T00:00:00.000Z', version: '1:1:1:1:1', mode: 0o644 });
+
+test('two appends in the same frame never reuse one page cursor', async t => {
+  const cursors = [];
+  const pages = {
+    '': { entries: [entry('a.txt')], total: 3, nextCursor: 'cursor-1' },
+    'cursor-1': { entries: [entry('b.txt')], total: 3, nextCursor: 'cursor-2' },
+    'cursor-2': { entries: [entry('c.txt')], total: 3, nextCursor: null },
+  };
+  const view = await setup(t, {
+    intercept: (url, init, route) => {
+      if (!String(url).includes('/v2/control')) return route(url, init);
+      const body = controlBody(init);
+      if (body.op !== 'entries.list') return route(url, init);
+      cursors.push(body.cursor ?? null);
+      const page = pages[body.cursor ?? ''];
+      assert.ok(page, `unexpected cursor ${body.cursor}`);
+      return envelope({ rootId: body.rootId, path: body.path ?? '', entries: page.entries, total: page.total, nextCursor: page.nextCursor, unaddressable: [] });
+    },
+  });
+  assert.deepEqual(cursors, [null], 'the first page is requested without a cursor');
+  await act(async () => {
+    const more = node(view.renderer, { 'data-fm-action': 'more' });
+    more.props.onClick();
+    more.props.onClick();
+    while (view.pending.size) await Promise.all([...view.pending]);
+  });
+  assert.equal(new Set(cursors).size, cursors.length, `a cursor must never be requested twice: ${JSON.stringify(cursors)}`);
+  const paths = nodes(view.renderer, { 'data-fm-entry': 'file' }).map(element => element.props['data-fm-path']);
+  assert.equal(new Set(paths).size, paths.length, 'a page must not be merged twice');
+  assert.equal(paths.includes('b.txt'), true, 'the second page still loads');
+});
+
+test('a late deletion manifest cannot reopen a cancelled dialog or submit anything', async t => {
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const commits = [];
+  const view = await setup(t, {
+    intercept: async (url, init, route) => {
+      if (!String(url).includes('/v2/control')) return route(url, init);
+      const body = controlBody(init);
+      if (body.op === 'delete.prepare') { await held; return envelope({ id: 'plan-1', targets: body.items, entryCount: 1, expiresAt: Date.now() + 60000, permanent: true, entries: [{ rootId: body.items[0].rootId, path: body.items[0].path, kind: 'file', size: 3, version: '1:1:1:1:1' }] }); }
+      if (body.op === 'delete.commit') commits.push(body);
+      return route(url, init);
+    },
+  });
+  const checkbox = node(view.renderer, { type: 'checkbox', 'aria-label': '选择: folder' });
+  await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
+  await act(async () => { node(view.renderer, { 'data-fm-action': 'delete' }).props.onClick(); });
+  assert.ok(nodes(view.renderer, { 'data-fm-delete-phase': 'preparing' }).length > 0, 'the dialog must open while the manifest is prepared');
+  await act(async () => { node(view.renderer, { 'data-fm-action': 'delete-cancel' }).props.onClick(); });
+  assert.equal(nodes(view.renderer, { 'data-fm-delete-phase': 'preparing' }).length, 0, 'cancelling closes the dialog');
+  release();
+  await view.flush();
+  assert.equal(nodes(view.renderer, { 'data-fm-delete-phase': 'ready' }).length, 0, 'a late manifest must not reopen the cancelled dialog');
+  assert.deepEqual(commits, [], 'nothing may be submitted after the attempt was cancelled');
+});
+
+test('the optional session hook may appear after mount without breaking hook order', async t => {
+  const view = await setup(t, { mainProps: { useSessions: undefined } });
+  const panel = view.client.cells.get('main:file-manager');
+  const checkbox = node(view.renderer, { type: 'checkbox', 'aria-label': '选择: folder' });
+  await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
+  assert.equal(node(view.renderer, { 'data-fm-action': 'reference' }).props.disabled, true, 'without a session registry there is nothing to reference');
+  const sessions = snapshotBoundary({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 'Session one' } } });
+  await act(async () => {
+    view.renderer.update(React.createElement(panel.component, { t: view.client.t, ...panel.options.inject?.(), useSessions: sessions.use }));
+  });
+  assert.equal(nodes(view.renderer, { 'data-fm-root': true }).length, 1, 'the panel still renders after the hook becomes available');
+  assert.equal(node(view.renderer, { 'data-fm-action': 'reference' }).props.disabled, false, 'the session catalog is now in use');
+});
+
+test('a ready frame triggers a resynchronization of the open directory', async t => {
+  let listed = 0;
+  let events;
+  const view = await setup(t, {
+    intercept: async (url, init, route) => {
+      if (String(url).includes('/v2/events')) {
+        events = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"kind":"ready","reason":"connected","seq":1}\n\n')); } });
+        return new Response(events, { headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (String(url).includes('/v2/control') && controlBody(init).op === 'entries.list') listed++;
+      return route(url, init);
+    },
+  });
+  const before = listed;
+  await view.flush();
+  // The Client coalesces a resynchronization behind its watcher debounce, so the
+  // listing a `ready` frame causes is not in flight yet when the requests that
+  // are already pending have settled.
+  await view.waitFor(() => listed > before);
+  assert.equal(listed > before, true, 'the ready frame must resynchronize the directory instead of trusting stale state');
+});
+
+test('an unrepresentable entry name is shown without an executable path', async t => {
+  const view = await setup(t, { seed: root => writeFile(path.join(root, 'bad\\name.txt'), 'x') });
+  assert.equal(nodes(view.renderer, { 'data-fm-entry': 'directory', 'data-fm-path': 'folder' }).length, 1, 'one special name must not break the listing');
+  assert.equal(nodes(view.renderer, { 'data-fm-entry': 'file', 'data-fm-path': 'bad\\name.txt' }).length, 0, 'an unaddressable entry must never carry an executable path');
+  assert.equal(nodes(view.renderer, { type: 'checkbox', 'aria-label': '选择: bad\\name.txt' }).length, 0, 'an unaddressable entry cannot be selected');
+  const block = nodes(view.renderer, { 'data-fm-unaddressable-name': 'bad\\name.txt' });
+  assert.equal(block.length, 1, 'the unaddressable entry is still shown for review');
+  assert.ok(textOf(block[0]).length > 'bad\\name.txt'.length, 'the reason is shown next to the name');
+});
+
+/** A complete running task view: the panel renders its progress as it arrives. */
+const runningTask = updatedAt => ({
+  id: 'r10', operation: 'copy', status: 'running', dismissed: false, historyRevision: 0, canDismiss: false,
+  updatedAt, createdAt: '2026-01-01T00:00:00.000Z',
+  items: [{ id: 'item-r10', source: { rootId: 'root', path: 'source.txt' }, destination: { rootId: 'root', path: 'target.txt' }, status: 'running', attempts: 1 }],
+  progress: { total: 1, completed: 0, failed: 0, skipped: 0, cancelled: 0, bytes: 0, totalBytes: 4 },
+});
+
+test('applying the Client again after a release never accumulates timers or event streams', async t => {
+  const intervals = new Set();
+  const view = await setup(t, {
+    tasks: true,
+    globals: {
+      setInterval(callback, delay) { const timer = { callback, delay }; intervals.add(timer); return timer; },
+      clearInterval(timer) { intervals.delete(timer); },
+    },
+  });
+  // A re-applied Client owns a fresh store, so the activity store is read
+  // through the current application rather than captured once.
+  const activity = () => view.client.cells.get('main:file-manager').options.inject().activity;
+  const streams = () => view.requests.filter(item => item.url === '/api/file-manager/v2/events');
+  const live = () => streams().filter(stream => stream.init.signal.aborted !== true);
+  // A running activity is what keeps a poll timer alive, so the timer count is
+  // only meaningful once one exists.
+  act(() => activity().put('tasks', runningTask('2026-01-01T00:00:01.000Z')));
+  const opened = streams().length;
+  assert.equal(live().length, 1, 'a mounted panel owns exactly one live subscription');
+  assert.equal(intervals.size, 1, 'a running activity owns exactly one poll timer');
+
+  view.unmount();
+  assert.equal(intervals.size, 0, 'unmounting the panel must release its timers');
+  assert.equal(live().length, 0, 'unmounting the panel must release its subscription');
+
+  await view.reloadClient();
+  act(() => activity().put('tasks', runningTask('2026-01-01T00:00:02.000Z')));
+  assert.equal(streams().length, opened * 2, 'a re-applied Client opens the same number of subscriptions, not one more per application');
+  assert.equal(live().length, 1, 'a re-applied Client keeps exactly one live subscription');
+  assert.equal(intervals.size, 1, 'a re-applied Client keeps exactly one poll timer');
+
+  view.unmount();
+  await view.client.dispose();
+  assert.equal(intervals.size, 0, 'disposing the application must leave no timer behind');
+  assert.equal(live().length, 0, 'disposing the application must leave no subscription behind');
+});
+
+// The panel carries its own stylesheet. The TypeScript port once rendered an
+// empty `<style>` element, so the whole panel lost its layout while every other
+// assertion still passed; this is the assertion that would have caught it.
+test('the panel ships its own stylesheet instead of rendering an empty style element', async t => {
+  const view = await setup(t);
+  const styles = view.renderer.root.findAll(candidate => candidate.type === 'style');
+  assert.equal(styles.length, 1, 'the panel must render exactly one stylesheet');
+  const css = textOf(styles[0]);
+  assert.ok(css.includes('.dsh-fm{'), 'the stylesheet must define the panel root layout');
+  assert.ok(css.includes('.dsh-fm .fm-layout'), 'the stylesheet must define the panel grid');
+  assert.ok(css.includes('.dsh-fm-dialog'), 'dialog styling must travel with the panel');
+  assert.ok(css.length > 1000, `an empty or truncated stylesheet breaks the layout (got ${css.length} characters)`);
 });

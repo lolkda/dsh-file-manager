@@ -4,8 +4,8 @@ import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
-import { createTaskService } from '../host/tasks.js';
+import { createManager } from '../dist/host/manager.js';
+import { createTaskService } from '../dist/host/tasks.js';
 
 const terminal = task => ['completed', 'partial', 'failed', 'cancelled'].includes(task.status);
 const turn = () => new Promise(resolve => setImmediate(resolve));

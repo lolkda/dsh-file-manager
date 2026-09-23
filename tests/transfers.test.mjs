@@ -4,9 +4,9 @@ import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from '
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
 
-const implementation = await import('../host/transfers.js').catch(error => {
+const implementation = await import('../dist/host/transfers.js').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND' && error.message.includes('/host/transfers.js')) return {};
   throw error;
 });
@@ -127,7 +127,7 @@ test('restored unfinished tasks are interrupted rather than advertised as resume
 });
 
 function uploadRequest(task, item, body = null, signal) {
-  return new Request(`http://local/api/file-manager/upload?taskId=${task.id}&itemId=${item.id}`, {
+  return new Request(`http://local/api/file-manager/v2/upload?taskId=${task.id}&itemId=${item.id}`, {
     method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body, duplex: 'half', signal,
   });
 }
@@ -310,7 +310,7 @@ test('retry resets failed items only and never replays successful file publicati
   assert.equal(await readFile(path.join(root, 'bad'), 'utf8'), 'done');
 });
 
-const downloadRequest = (task, signal) => new Request(`http://local/api/file-manager/download?taskId=${task.id}`, { signal });
+const downloadRequest = (task, signal) => new Request(`http://local/api/file-manager/v2/download?taskId=${task.id}`, { signal });
 
 // Applying text decoding, claiming browser persistence, or eager whole-file reads
 // would break the literal bytes and state-transition assertions here.

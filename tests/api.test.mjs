@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
 
 async function plugin() {
   let module;
-  try { module = await import('../index.js'); }
+  try { module = await import('../dist/index.js'); }
   catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error; }
   assert.equal(typeof module?.createControlHandler, 'function', 'the authenticated file-manager route adapter is missing');
   return module;
@@ -16,7 +16,7 @@ async function plugin() {
 
 function request(payload) {
   if (payload && typeof payload === 'object' && !Array.isArray(payload)) payload = { requestId: randomUUID(), ...payload };
-  return new Request('http://localhost/api/file-manager/control', {
+  return new Request('http://localhost/api/file-manager/v2/control', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
   });
 }
@@ -95,9 +95,13 @@ test('Host plugin mounts exact authenticated Fetch routes and contributes no Age
     effect(callback) { const dispose = callback(); disposers.push(dispose); return dispose; },
   };
   await module.apply(ctx);
-  assert.deepEqual(routes.map(route => route.path), ['/api/file-manager/control', '/api/file-manager/text', '/api/file-manager/upload', '/api/file-manager/download', '/api/file-manager/events']);
+  assert.deepEqual(routes.map(route => route.path), [
+    '/api/file-manager/v2/control', '/api/file-manager/v2/manifest', '/api/file-manager/v2/text',
+    '/api/file-manager/v2/upload', '/api/file-manager/v2/download', '/api/file-manager/v2/events',
+  ]);
   assert.deepEqual(routes[0].methods, ['POST']);
   assert.equal(routes[0].requestBody, 'streaming');
+  assert.equal(routes[4].requestBody, 'buffered', 'download keeps GET with a buffered request body');
   assert.equal((await routes[0].fetch(request({ op: 'bootstrap' }))).status, 200);
   for (const dispose of disposers.reverse()) await dispose?.();
   assert.deepEqual(routes, []);

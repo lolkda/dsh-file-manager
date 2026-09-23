@@ -19,16 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Require the tag, package.json and the wire version to agree
+      - name: Require the tag and package.json to agree with the built entrypoint
         id: agreement
         run: |
           set -euo pipefail
           version=$(node --input-type=module -e "import { readFileSync } from 'node:fs'; process.stdout.write(JSON.parse(readFileSync('package.json', 'utf8')).version)")
-          wire=$(node --input-type=module -e "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync('index.js', 'utf8').match(/const VERSION = '([^']+)'/)[1])")
+          npm ci
+          npm run build
+          wire=$(node --input-type=module -e "const m = await import('./dist/index.js'); process.stdout.write(String(m.VERSION))")
           echo "package.json: $version"
-          echo "index.js:     $wire"
+          echo "dist/index.js: $wire"
           if [ "$version" != "$wire" ]; then
-            echo "::error::index.js VERSION ($wire) disagrees with package.json ($version)"
+            echo "::error::the built Host entry reports version $wire, which disagrees with package.json ($version)"
             exit 1
           fi
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then

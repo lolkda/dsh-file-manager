@@ -4,17 +4,24 @@
 
 ## 当前版本与验证状态
 
-- 工作区版本：**0.1.4**，新增任务卡片关闭、清理已结束和折叠；保留此前默认路径、真实下载、删除确认及文件安全保护。
-- **326 项自动测试全部通过**，业务 JavaScript 语法检查通过。本次新增 67 项任务历史、界面、API 与实际存储/HTTP 回归。
-- **0.1.4 已通过 plugin_manager 安装保存并启用**，结果为 `restart-required`。实际安装的生产模块另通过 **58 项**任务历史/API/真实 HTTP/JSON 回归，客户端文件与已测试源码逐字节一致；原页面的新代次仍须重启 DSH 并刷新后核对。
-- 0.1.4 发布快照：[local-dsh-file-manager-0.1.4.tgz](artifacts/local-dsh-file-manager-0.1.4.tgz)，SHA-256：`96a7c542331d81c860a002ce9be8ea5f27103d87fb70ca3423170162b182bce1`。
+- 当前版本：**0.2.8**（TypeScript 结构性重构代次）。本代次在**独立副本** `dsh-file-manager-ts/` 中进行：原始项目 `dsh-file-manager/` 全程只读，不在其中运行测试、构建或修改文件。0.2.8 发布前已重新通过 `npm run check`（类型检查、构建与产物语法检查）、`npm run build:native` 与全量 **518 项测试（0 失败、0 跳过）**；公开发布状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager/v/0.2.8) 为准。
+- 重构前的副本基线（改动前实测）：`npm test` **329/329 通过、0 跳过**，`npm run check` 与 `npm run build:native` 通过。该基线是本次重构的等价性红线。
+- 0.1.4 发布快照：`artifacts/local-dsh-file-manager-0.1.4.tgz`，SHA-256：`96a7c542331d81c860a002ce9be8ea5f27103d87fb70ca3423170162b182bce1`。
 - 0.1.3 安装时返回 `restart-required`；用户后续截图已显示默认 `/` 与文本预览，并发现旧下载记录缺少关闭入口。该版实际安装模块通过 4 项 HTTP 与 4 项 Storage 回归。本次 0.1.4 的安装保存与运行时激活单独核对。
-- 0.1.3 快照：[local-dsh-file-manager-0.1.3.tgz](artifacts/local-dsh-file-manager-0.1.3.tgz)，SHA-256：`82abb194a7d40458ab30192b5b33c1f02af1cec01b0258bbd32b19b8eda3f062`。解包快照通过 63 项 Client/HTTP/Storage 回归；对比确认所有 `host/` 文件与 0.1.2 相同，本次仅修改入口请求适配和前端行为。
+- 0.1.3 快照：`artifacts/local-dsh-file-manager-0.1.3.tgz`，SHA-256：`82abb194a7d40458ab30192b5b33c1f02af1cec01b0258bbd32b19b8eda3f062`。解包快照通过 63 项 Client/HTTP/Storage 回归；对比确认所有 `host/` 文件与 0.1.2 相同，本次仅修改入口请求适配和前端行为。
 - **0.1.0 已撤回，不应再启用。** 用户重启时暴露 `invalid unit name 'local-file-manager'`；之前 235 项测试没有覆盖真实存储后端命名校验。这是插件缺陷，不是目录数据损坏。
 - 0.1.1 阶段先恢复包引用并停用故障版，再安装启动修复包；随后用户的实际页面截图确认新版界面已经显示。
 - 用户最新截图确认 0.1.2 的重复选择文案已消失，随后暴露下载失败、默认路径和删除提示问题。0.1.3 的实际安装/激活结果单独核对，测试通过不替代页面加载确认。
-- 0.1.2 快照：[local-dsh-file-manager-0.1.2.tgz](artifacts/local-dsh-file-manager-0.1.2.tgz)，SHA-256：`531f76445c7133649f490aba0c8f6104e1cb907cae20f772130a1d3c2ef5d7e7`。打包后 5 项 UI 与 4 项真实存储回归均通过；与 0.1.1 比较确认所有 Host I/O 实现字节未变，Host 入口仅更新版本号。
-- 0.1.1 的解包快照及实际安装目录均以 `agent (1000:1000)` 在新 Node 进程中通过 4 项真实后端回归。安装快照：[local-dsh-file-manager-0.1.1.tgz](artifacts/local-dsh-file-manager-0.1.1.tgz)，SHA-256：`9a1aa07df33282ea0a137876c162aad0ce2ca9957e629acb5caaacdf5284627f`。
+- 0.1.2 快照：`artifacts/local-dsh-file-manager-0.1.2.tgz`，SHA-256：`531f76445c7133649f490aba0c8f6104e1cb907cae20f772130a1d3c2ef5d7e7`。打包后 5 项 UI 与 4 项真实存储回归均通过；与 0.1.1 比较确认所有 Host I/O 实现字节未变，Host 入口仅更新版本号。
+- 0.1.1 的解包快照及实际安装目录均以 `agent (1000:1000)` 在新 Node 进程中通过 4 项真实后端回归。安装快照：`artifacts/local-dsh-file-manager-0.1.1.tgz`，SHA-256：`9a1aa07df33282ea0a137876c162aad0ce2ca9957e629acb5caaacdf5284627f`。
+- 以上 `artifacts/**/*.tgz` 与 `artifacts/ts-refactor/` 下的日志均为**本机历史快照与证据文件**（`artifacts/` 已被 `.gitignore` 忽略），仓库与 npm 包内**不提供下载**；需要复核时在本机用 `npm pack` 与对应测试重新生成。
+
+### 0.2.8 深路径面包屑修复
+
+- 深路径挤压已修复：路径栏保持单行，完整面包屑只在面包屑区域内横向滚动，刷新控件不再被压缩，列表与预览列也不被撑宽；每一级目录名不换行、不收缩、不折叠为省略层级，导航、禁用与错误语义不变（见 [SPEC.md](SPEC.md) 的 R20 与验收第 11 条）。
+- 新增 13 项路径栏回归：真实渲染结构与产物实际输出的样式声明契约，以及真实 Host 上的导航、禁用与错误控制流。在 0.2.7 基础上加入这 13 项后，全量套件 **518 项通过**（真实运行，0 失败）。
+- 用户已在真实页面确认该修复效果良好。
+- 仍未验证：1620×900 / 1000px / 600px 三档宽度下的路径栏表现与键盘操作；真实 2 GiB 文件与 10,000 条目压力测试。**自动化发布前验证已通过，不替代上述真实页面与压力验收。**
 
 ### 0.1.4 任务记录关闭与折叠
 
@@ -96,16 +103,22 @@
 
 本发布包面向当前 **Linux x64 / Node 24+** Host。包内带原生无覆盖重命名助手及其 C 源码；不设置自动安装脚本。
 
+0.2.0 起源码为 TypeScript，位于 `src/`：Host 半边由 `tsc` 编译为真实 ESM JavaScript 到 `dist/`，Client 半边由 esbuild 打包为 `dist/client.js`，并包在 DSH 要求的 `window.__ModuleLoader__.load({ id: "<包名>", factory })` 外壳中。**发布产物是编译后的 JavaScript，不依赖 Node 在 `node_modules` 内直接运行 TypeScript。**
+
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
 npm run build:native
-npm test
-npm run check
+npm run build        # tsc 编译 Host + esbuild 打包 Client 到 dist/
+npm run typecheck    # 仅类型检查（Host + Client 两套 tsconfig）
+npm run check        # typecheck + build + 对 dist/ 每个产物做 node --check
+npm test             # 测试从 dist/ 导入被测实现
 ```
+
+`npm run build:host` 只编译 Host 半边，便于在 Client 尚未就绪时分阶段验证。
 
 `build:native` 使用系统 `cc` 显式编译。不要在助手缺失、不匹配或不支持时以普通 rename 代替。
 
-`tests/runtime-storage.test.mjs` 与 `tests/download-navigation.test.mjs` 针对**真实部署的 DSH**运行，默认从 `/usr/local/lib/node_modules/@deepseek-ai/dsh` 解析，可用 `FILE_MANAGER_DSH_RUNTIME_ROOT` 指向别的安装。找不到运行时时它们会**明确跳过这 12 项并打印原因**，不再让整个文件在导入期崩溃；CI 会安装 `@deepseek-ai/dsh@0.1.6-alpha.2` 并断言其可解析，因此 runner 上跑的是完整覆盖而不是静默跳过。
+`tests/runtime-storage.test.mjs` 与 `tests/download-navigation.test.mjs` 针对**真实部署的 DSH**运行，默认从 `/usr/local/lib/node_modules/@deepseek-ai/dsh` 解析，可用 `FILE_MANAGER_DSH_RUNTIME_ROOT` 指向别的安装。找不到运行时时它们会**明确跳过并打印原因**，不再让整个文件在导入期崩溃；CI 会安装 `@deepseek-ai/dsh@0.1.6-alpha.2` 并断言其可解析，因此 runner 上跑的是完整覆盖而不是静默跳过。
 
 ## 安装与升级
 
@@ -119,15 +132,18 @@ npm run check
 
 npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**，以支持标准发布。改名只触及**包身份**（npm 名、bundle patch 的 `name`、`client.js` 的模块 id）；**运行时命名空间与 unit id 保持 `local-file-manager` 不变**，否则会重演 0.1.0 的存储命名事故，并让已保存的设置与 storage domain 失联。`tests/package-identity.test.mjs` 锁住这条边界。
 
-因此当前 profile 里已安装的仍是旧名 `@local/dsh-file-manager`。它是磁盘上的一份独立副本，改名后**旧安装继续可用但不会自动跟随**；要采用新身份需用 `plugin_manager` 移除旧包再安装新包，结果为 `restart-required`，重启 DSH 并刷新页面才生效。
+改名后，profile 里那份旧名 `@local/dsh-file-manager@0.1.4` 的安装是磁盘上的独立副本，**不会自动跟随**改名；要采用新身份需用 `plugin_manager` 移除旧包再安装新包，结果为 `restart-required`，重启 DSH 并刷新页面才生效。该替换已经执行：当前 profile 安装的是新身份 `@lolkda/dsh-file-manager@0.2.7`（`enabled=true`，安装器返回 `restart-required`，记录见 [docs/VERIFICATION-REPORT.md](https://github.com/lolkda/dsh-file-manager/blob/main/docs/VERIFICATION-REPORT.md) §9）。
 
-## 尚需真实页面验收
+## 真实页面验收状态
 
-1. 重启当前 DSH 并刷新原页面；打开“文件”，确认新建、编辑、复制粘贴、传输和任务区可用。
-2. 在专用测试目录验证保存、外部改动冲突、切换面板保留草稿、永久删除取消与确认。
-3. 上传含空目录的文件夹、下载 ZIP，并在浏览器下载完成后核对内容。
-4. 选择一个已有草稿/引用的会话，确认引用只追加到该会话且不发送。
-5. 检查明暗主题、键盘操作、重启后根登记和中断任务状态。
+- 已在真实页面确认（0.2.7）：深路径面包屑修复效果良好，粘贴弹窗 UI 修复效果良好。
+- 仍需在真实页面核对：
+  1. 新建、编辑、复制粘贴、传输和任务区的完整操作链。
+  2. 专用测试目录中的保存、外部改动冲突、切换面板保留草稿、永久删除取消与确认。
+  3. 含空目录的文件夹上传、ZIP 下载及浏览器落盘后的内容核对。
+  4. 选择一个已有草稿/引用的会话，确认引用只追加到该会话且不发送。
+  5. 明暗主题、键盘操作、重启后根登记和中断任务状态。
+  6. 1620×900 / 1000px / 600px 三档宽度下的路径栏表现与键盘滚动查看完整层级。
 
 ## 已知限制
 
@@ -137,6 +153,7 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 - 混合换行映射有复杂度预算，超限会拒绝保存并保留草稿，不静默规范化。
 - 含双引号或控制字符的路径不能安全表示为当前会话引用语法，引用操作会明确拒绝。
 - 尚未执行真实 2 GiB 文件和 10,000 条目全链路压力测试；现有测试验证配置限制和流式边界，不宣称压力性能。
+- 复制/移动路径的内部读取放大在 N× 量级：同一份字节会在规划期强校验、复制流、目标校验、删源前重证里各读一次，16 MiB 文件实测 `rchar` 增量约为文件大小的 10 倍，尚未做 2 GiB 实测。这是已知的实现特性，**不是校验被裁剪**——核验预算按操作清单的文件字节总量一次性扣减，逐次读取仍有硬上限，`sha256` 仍逐字节核验。后续若优化，只允许复用已算出的摘要或合并同一字节的重复全量哈希，不得以减少校验次数换取吞吐。
 
 ## 开发与复核记录
 
@@ -150,8 +167,8 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 
 仓库带有两条 GitHub Actions 工作流，均为 Node 24 / Linux x64：
 
-- `.github/workflows/ci.yml`：push 到 `main`、PR 与手动触发时执行 `npm ci` → `build:native` → `check` → 安装 DSH 运行时 → `test` → `npm pack`，断言压缩包确实含 `index.js`、`client.js`、`cordis.patch.yml` 与 `host/native/rename-no-replace`，然后上传为构建产物。上传步骤为**尽力而为**（`continue-on-error`）：Actions 产物存储有配额，配额耗尽不应让每次运行变红，真正的闸门是打包与断言。
-- `.github/workflows/release.yml`：推送 `v*` 标签时先校验 **tag、`package.json` 与 `index.js` 的 `VERSION` 三者一致**，通过后才发布到 npmjs.com。
+- `.github/workflows/ci.yml`：push 到 `main`、PR 与手动触发时执行 `npm ci` → `build:native` → `check`（类型检查 + 构建 + 产物语法检查）→ 断言 `dist/client.js` 注册的模块 id 等于包名 → 安装 DSH 运行时 → `test` → `npm pack`，断言压缩包确实含 `dist/index.js`、`dist/client.js`、`dist/host/scheduler.js`、`cordis.patch.yml` 与 `host/native/rename-no-replace`，然后上传为构建产物。上传步骤为**尽力而为**（`continue-on-error`）：Actions 产物存储有配额，配额耗尽不应让每次运行变红，真正的闸门是打包与断言。
+- `.github/workflows/release.yml`：推送 `v*` 标签时先构建并校验 **tag 与 `package.json` 的 `version` 一致，且构建后的 `dist/index.js` 导出的 `VERSION` 与之一致**，通过后才发布到 npmjs.com。
 
 顺序不是随意的：`build:native` 必须早于 `npm test`，因为助手缺失时会有 3 项原子发布测试失败；而助手被 `.gitignore` 排除，全新 checkout 里并不存在。打包断言同样必要，否则会发出一个装上即坏的包。
 
@@ -162,12 +179,12 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 发布 `@lolkda/dsh-file-manager` 的步骤：
 
 ```sh
-# 1. 同步版本号（两处必须一致，测试会守住）
-#    package.json 的 version 与 index.js 的 VERSION
+# 1. 同步版本号（单一来源）
+#    package.json 的 version 是唯一来源；构建后的 dist/index.js 导出的 VERSION 由它派生
 # 2. 提交并推送
-git commit -am "release 0.1.5" && git push
+git commit -am "release 0.2.8" && git push
 # 3. 打标签触发发布
-git tag v0.1.5 && git push origin v0.1.5
+git tag v0.2.8 && git push origin v0.2.8
 ```
 
 ## License

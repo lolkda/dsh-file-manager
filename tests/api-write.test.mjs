@@ -4,13 +4,13 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import * as plugin from '../index.js';
-import { createManager } from '../host/manager.js';
+import * as plugin from '../dist/index.js';
+import { createManager } from '../dist/host/manager.js';
 
 async function integrated(t) {
-  const { createTaskService } = await import('../host/tasks.js');
-  const { createTransferService } = await import('../host/transfers.js');
-  const { createWatchService } = await import('../host/watch.js');
+  const { createTaskService } = await import('../dist/host/tasks.js');
+  const { createTransferService } = await import('../dist/host/transfers.js');
+  const { createWatchService } = await import('../dist/host/watch.js');
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-integration-'));
   const manager = createManager();
   const grant = await manager.addRoot({ path: root });
@@ -22,12 +22,16 @@ async function integrated(t) {
   const watcher = createWatchService({ manager });
   t.after(async () => { await watcher.close(); await transfers.close(); await tasks.close(); await manager.close(); await rm(root, { recursive: true, force: true }); });
   const control = plugin.createControlHandler({ manager, tasks, transfers, watcher, limits, workspaces: () => [] });
+  const manifest = plugin.createControlHandler({ manager, tasks, transfers, watcher, limits, workspaces: () => [], envelope: 'manifest' });
   const ref = relative => ({ rootId: grant.id, path: relative });
-  const call = payload => control(request({ requestId: randomUUID(), ...payload }));
+  // Bulk manifests travel on the manifest route; everything else uses the small control envelope.
+  const call = payload => ['tasks.start', 'tasks.retry', 'transfers.begin'].includes(payload.op)
+    ? manifest(request({ requestId: randomUUID(), ...payload }, 'manifest'))
+    : control(request({ requestId: randomUUID(), ...payload }));
   return { root, manager, tasks, transfers, watcher, ref, call, completed };
 }
 
-const request = (payload, endpoint = 'control') => new Request(`http://localhost/api/file-manager/${endpoint}`, {
+const request = (payload, endpoint = 'control') => new Request(`http://localhost/api/file-manager/v2/${endpoint}`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
 });
 async function fixture(t) {
@@ -157,7 +161,7 @@ test('transfer control endpoints prepare a real raw download', async t => {
   const begin = await call({ op: 'transfers.begin', direction: 'download', ...ref('file.txt') });
   assert.equal(begin.status, 200);
   const task = (await begin.json()).value;
-  const response = await transfers.handleDownload(new Request(`http://localhost/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`));
+  const response = await transfers.handleDownload(new Request(`http://localhost/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`));
   assert.equal(await response.text(), 'real transfer');
   const fetched = await (await call({ op: 'transfers.get', taskId: task.id })).json();
   assert.equal(fetched.value.status, 'completed');

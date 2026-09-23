@@ -23,14 +23,14 @@ test('bundle declares independently installable Host and Client entrypoints', as
   assert.ok(manifest, 'the installable file-manager package is missing');
   assert.equal(manifest.name, '@lolkda/dsh-file-manager');
   assert.equal(manifest.type, 'module');
-  assert.equal(manifest.exports['.'], './index.js');
-  assert.equal(manifest.exports['./client'], './client.js');
+  assert.equal(manifest.exports['.'], './dist/index.js');
+  assert.equal(manifest.exports['./client'], './dist/client.js');
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
   assert.equal(manifest.dsh.client.platform, 'web');
 });
 
 test('a new file manager has no root grants and requires no Session', async () => {
-  const module = await optionalModule('host/manager.js');
+  const module = await optionalModule('dist/host/manager.js');
   assert.equal(typeof module?.createManager, 'function', 'the Session-independent manager is missing');
   const manager = module.createManager();
   assert.deepEqual(await manager.listRoots(), []);
@@ -52,12 +52,17 @@ test('bundle patch installs a Host row without changing any Agent preset', async
 
 test('the wire version identifies the same release as the installed package', async () => {
   const manifest = JSON.parse(await readFile(new URL('package.json', base), 'utf8'));
-  const { createManager } = await optionalModule('host/manager.js');
-  const { createControlHandler } = await optionalModule('index.js');
+  const { createManager } = await optionalModule('dist/host/manager.js');
+  const { createControlHandler } = await optionalModule('dist/index.js');
   const manager = createManager();
   const handler = createControlHandler({ manager, workspaces: () => [] });
-  const response = await handler(new Request('http://localhost/api/file-manager/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'bootstrap' }) }));
-  assert.equal((await response.json()).value.version, manifest.version);
+  const response = await handler(new Request('http://localhost/api/file-manager/v2/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'bootstrap' }) }));
+  const bootstrap = (await response.json()).value;
+  assert.equal(response.status, 200);
+  assert.equal(bootstrap.version, manifest.version);
+  assert.equal(bootstrap.stage, 'basic-management');
+  assert.equal(bootstrap.degraded, null, 'a healthy composition reports no degradation');
+  assert.deepEqual(bootstrap.roots, []);
   await manager.close();
 });
 

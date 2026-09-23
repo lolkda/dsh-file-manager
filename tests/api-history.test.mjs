@@ -4,12 +4,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createControlHandler } from '../index.js';
-import { createManager } from '../host/manager.js';
-import { createTaskService } from '../host/tasks.js';
-import { createTransferService } from '../host/transfers.js';
+import { createControlHandler } from '../dist/index.js';
+import { createManager } from '../dist/host/manager.js';
+import { createTaskService } from '../dist/host/tasks.js';
+import { createTransferService } from '../dist/host/transfers.js';
 
-const request = payload => new Request('http://localhost/api/file-manager/control', {
+const request = payload => new Request('http://localhost/api/file-manager/v2/control', {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
 });
 
@@ -43,7 +43,7 @@ async function fixture(t) {
   await tasks.list();
   transfers = createTransferService({ manager, async persistTasks(records) { for (const record of records) savedTransfers.set(record.id, structuredClone(record)); } });
   const completed = await transfers.begin({ direction: 'download', ...ref('source.txt') });
-  const downloaded = await transfers.handleDownload(new Request(`http://localhost/api/file-manager/download?taskId=${completed.id}`));
+  const downloaded = await transfers.handleDownload(new Request(`http://localhost/api/file-manager/v2/download?taskId=${completed.id}`));
   assert.equal(await downloaded.text(), 'do not delete or re-run this file\n');
   const queued = await transfers.begin({ direction: 'download', ...ref('source.txt') });
   const control = createControlHandler({ manager, tasks, transfers, workspaces: () => [] });
@@ -138,7 +138,7 @@ test('close request ids protect retries from repeated or conflicting metadata mu
 test('a stale close action cannot hide a newly retried and completed download', async t => {
   const f = await fixture(t);
   await f.transfers.retry(f.completed.id);
-  await (await f.transfers.handleDownload(new Request(`http://localhost/api/file-manager/download?taskId=${f.completed.id}`))).text();
+  await (await f.transfers.handleDownload(new Request(`http://localhost/api/file-manager/v2/download?taskId=${f.completed.id}`))).text();
   const response = await f.call({ op: 'activities.dismiss', items: [f.item('transfer', f.completed.id, 0)] });
   assert.equal(response.status, 200);
   const result = (await response.json()).value.results[0];

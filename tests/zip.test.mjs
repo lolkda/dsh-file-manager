@@ -6,8 +6,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import yauzl from 'yauzl';
-import { createManager } from '../host/manager.js';
-import { createTransferService } from '../host/transfers.js';
+import { createManager } from '../dist/host/manager.js';
+import { createTransferService } from '../dist/host/transfers.js';
 
 async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-zip-'));
@@ -19,7 +19,7 @@ async function fixture(t, options = {}) {
   service = createTransferService({ manager: options.wrapManager ? options.wrapManager(manager) : manager, ...options });
   return { base, root, manager, grant, service };
 }
-const download = (service, task) => service.handleDownload(new Request(`http://local/api/file-manager/download?taskId=${task.id}`));
+const download = (service, task) => service.handleDownload(new Request(`http://local/api/file-manager/v2/download?taskId=${task.id}`));
 async function unzip(bytes) {
   const archive = await promisify(yauzl.fromBuffer)(bytes, { lazyEntries: true, strictFileNames: true });
   const entries = new Map();

@@ -90,7 +90,7 @@ async function historyPanel(t, options = {}) {
     tasks: true, transfers: true, globals: options.globals,
     intercept: async (url, init, route) => {
       const input = typeof init.body === 'string' ? JSON.parse(init.body) : null;
-      if (url === '/api/file-manager/events' && options.watch) {
+      if (url === '/api/file-manager/v2/events' && options.watch) {
         const stream = { signal: init.signal, cancelled: false };
         const body = new ReadableStream({ start(controller) { stream.controller = controller; }, cancel() { stream.cancelled = true; } });
         events.push(stream);

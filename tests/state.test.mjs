@@ -3,12 +3,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
 
 async function stateModule() {
   let module;
-  try { module = await import('../host/state.js'); }
-  catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND' || error.url !== new URL('../host/state.js', import.meta.url).href) throw error; }
+  try { module = await import('../dist/host/state.js'); }
+  catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND' || error.url !== new URL('../dist/host/state.js', import.meta.url).href) throw error; }
   assert.equal(typeof module?.openProfileState, 'function', 'the profile storage adapter is missing');
   return module;
 }

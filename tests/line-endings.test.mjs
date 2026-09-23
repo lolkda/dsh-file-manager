@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
+import { detectLineEndings, preserveLineEndings } from '../dist/host/line-endings.js';
 
 async function save(t, before, draft) {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-eol-'));
@@ -48,4 +49,27 @@ test('saving normalized textarea text does not normalize an unchanged mixed file
   const before = '\ufeffa\r\nb\nc\r';
   const result = await save(t, before, 'a\nb\nc\n');
   assert.equal(result.contents, before);
+});
+
+test('the newline detector names the style a document actually uses', () => {
+  assert.equal(detectLineEndings('a\nb\n'), 'lf');
+  assert.equal(detectLineEndings('a\r\nb\r\n'), 'crlf');
+  assert.equal(detectLineEndings('a\rb\r'), 'cr');
+  assert.equal(detectLineEndings('a\r\nb\nc\r'), 'mixed');
+  assert.equal(detectLineEndings('no newline at all'), 'lf');
+  assert.equal(detectLineEndings(''), 'lf');
+});
+
+test('the separator mapper keeps every surviving line ending and infers the new one', () => {
+  assert.equal(preserveLineEndings('a\nb\n', 'a\r\nb\r\n'), 'a\r\nb\r\n');
+  assert.equal(preserveLineEndings('a\nb\n', 'a\rb\r'), 'a\rb\r');
+  assert.equal(preserveLineEndings('a\ninserted\nb\nc', 'a\r\nb\nc'), 'a\r\ninserted\r\nb\nc');
+  assert.equal(preserveLineEndings('a\nc\nd\n', 'a\r\nb\nc\rd\n'), 'a\r\nc\rd\n');
+  assert.equal(preserveLineEndings('a\nb', 'a\r\nb'), 'a\r\nb', 'a missing final newline must not be invented');
+});
+
+test('a uniform document maps through without consulting the diff budget', () => {
+  const before = 'one\r\ntwo\r\nthree\r\n';
+  assert.equal(preserveLineEndings('one\ntwo\nthree\n', before), before);
+  assert.equal(preserveLineEndings('', before), '');
 });

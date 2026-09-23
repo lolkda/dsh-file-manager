@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-atomic-'));

@@ -15,7 +15,7 @@ import yauzl from 'yauzl';
 // dev-only assertion/ZIP tools when FILE_MANAGER_TEST_PACKAGE_ROOT is supplied.
 const fileManager = await import(process.env.FILE_MANAGER_TEST_PACKAGE_ROOT
   ? pathToFileURL(path.join(process.env.FILE_MANAGER_TEST_PACKAGE_ROOT, 'index.js')).href
-  : new URL('../index.js', import.meta.url).href);
+  : new URL('../dist/index.js', import.meta.url).href);
 
 // This suite drives the real deployed DSH runtime. A runner or a fresh clone that
 // has none cannot resolve it, so it reports an explicit skip instead of crashing
@@ -90,7 +90,8 @@ async function fixture(t, { filename = '下载说明.txt', bytes = Buffer.from('
   const cookie = login.headers.get('set-cookie').split(';', 1)[0];
   const request = (relative, options = {}) => fetch(`${origin}${relative}`, { ...options, headers: { cookie, ...options.headers }, signal: options.signal ?? AbortSignal.timeout(5000) });
   const control = async payload => {
-    const response = await request('/api/file-manager/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: randomUUID(), ...payload }) });
+    const route = ['tasks.start', 'tasks.retry', 'transfers.begin'].includes(payload.op) ? 'manifest' : 'control';
+    const response = await request(`/api/file-manager/v2/${route}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: randomUUID(), ...payload }) });
     const body = await response.json();
     assert.equal(response.status, 200, JSON.stringify(body));
     return body.value;
@@ -123,7 +124,7 @@ async function unzip(buffer) {
 test('a cookie-authenticated native GET traverses the deployed bridge and downloads exact file bytes', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t, { bytes: Buffer.alloc(256 * 1024, 0x61) });
   const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
-  const response = await f.request(`/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' } });
+  const response = await f.request(`/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' } });
   assert.equal(response.status, 200, `the real HTTP bridge rejected a bodyless GET: ${f.failures.map(String).join('; ')}`);
   assert.match(response.headers.get('content-disposition'), /attachment;/);
   assert.match(response.headers.get('content-disposition'), /filename\*=UTF-8''/);
@@ -138,7 +139,7 @@ test('a cookie-authenticated native GET traverses the deployed bridge and downlo
 test('a native directory download preserves ZIP members and empty directories through the deployed bridge', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
   const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: '' });
-  const response = await f.request(`/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`);
+  const response = await f.request(`/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`);
   assert.equal(response.status, 200, f.failures.map(String).join('; '));
   assert.equal(response.headers.get('content-type'), 'application/zip');
   const entries = await unzip(Buffer.from(await response.arrayBuffer()));
@@ -151,7 +152,7 @@ test('a native directory download preserves ZIP members and empty directories th
 test('download request-mode fixes do not bypass signed-cookie and cross-site rejection', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
   const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
-  const relative = `/api/file-manager/download?taskId=${encodeURIComponent(task.id)}`;
+  const relative = `/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`;
   const unauthorized = await fetch(`${f.origin}${relative}`, { signal: AbortSignal.timeout(5000) });
   assert.equal(unauthorized.status, 401);
   await unauthorized.text();
@@ -164,15 +165,15 @@ test('download request-mode fixes do not bypass signed-cookie and cross-site rej
 test('closing task history through real HTTP requires authentication and never cancels a queued transfer', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
   const finished = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
-  await (await f.request(`/api/file-manager/download?taskId=${finished.id}`)).arrayBuffer();
+  await (await f.request(`/api/file-manager/v2/download?taskId=${finished.id}`)).arrayBuffer();
   const queued = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
   const payload = { op: 'activities.dismiss', requestId: 'http-close-history', items: [
     { kind: 'transfer', taskId: finished.id, expectedHistoryRevision: 0 },
     { kind: 'transfer', taskId: queued.id, expectedHistoryRevision: 0 },
   ] };
-  const unauthorized = await fetch(`${f.origin}/api/file-manager/control`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(5000) });
+  const unauthorized = await fetch(`${f.origin}/api/file-manager/v2/control`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(5000) });
   assert.equal(unauthorized.status, 401); await unauthorized.text();
-  const crossSite = await f.request('/api/file-manager/control', { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' }, body: JSON.stringify(payload) });
+  const crossSite = await f.request('/api/file-manager/v2/control', { method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' }, body: JSON.stringify(payload) });
   assert.equal(crossSite.status, 403); await crossSite.text();
   assert.notEqual((await f.control({ op: 'transfers.get', taskId: finished.id })).dismissed, true);
   const result = await f.control(payload);
@@ -190,10 +191,10 @@ test('text reads use the control route while large saves retain a streamed reque
   const f = await fixture(t, { bytes: Buffer.from('original\n') });
   const snapshot = await f.control({ op: 'text.read', rootId: f.grant.id, path: f.filename });
   const text = 'large save without the carrier buffer cap\n'.repeat(8000);
-  const saved = await f.request('/api/file-manager/text', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'save', requestId: randomUUID(), rootId: f.grant.id, path: f.filename, expectedVersion: snapshot.version, text }) });
+  const saved = await f.request('/api/file-manager/v2/text', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'save', requestId: randomUUID(), rootId: f.grant.id, path: f.filename, expectedVersion: snapshot.version, text }) });
   assert.equal(saved.status, 200, await saved.text());
   assert.equal(await readFile(path.join(f.files, f.filename), 'utf8'), text);
-  const obsoleteGet = await f.request(`/api/file-manager/text?rootId=${f.grant.id}&path=${encodeURIComponent(f.filename)}`);
+  const obsoleteGet = await f.request(`/api/file-manager/v2/text?rootId=${f.grant.id}&path=${encodeURIComponent(f.filename)}`);
   assert.equal(obsoleteGet.status, 404, 'unsupported GET must be rejected by dispatch, not throw while constructing a Request body');
   await obsoleteGet.text();
   assert.deepEqual(f.failures, []);

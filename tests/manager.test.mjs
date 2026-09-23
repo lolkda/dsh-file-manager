@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { createManager } from '../host/manager.js';
+import { createManager } from '../dist/host/manager.js';
 
 async function fixture(t) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-test-'));
