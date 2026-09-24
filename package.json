@@ -1,6 +1,6 @@
 {
   "name": "@lolkda/dsh-file-manager",
-  "version": "0.2.8",
+  "version": "0.2.9-rc.1",
   "description": "Independent DSH file manager with explicit Host-local root grants",
   "keywords": [
     "dsh",
@@ -59,6 +59,12 @@
     "diff": "^8.0.0",
     "yazl": "^3.0.0",
     "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.1.7-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": { "optional": true }
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

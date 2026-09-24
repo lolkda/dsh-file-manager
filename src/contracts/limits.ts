@@ -10,7 +10,13 @@
 
 import { fail } from './errors.js';
 
-/** Settings namespace. kebab-case is what the Deployment's settings registry requires. */
+/**
+ * Configuration section identity: the kebab-case bundle row id this plugin is
+ * installed under (`cordis.patch.yml`). DSH 0.1.7-rc.1 keys a plugin's settings
+ * form by its profile entry id and validates the row's `config` against the
+ * plugin's exported `Config` schema, so this constant is the id the row must
+ * carry — not a namespace registered at runtime.
+ */
 export const SETTINGS_NAMESPACE = 'local-file-manager' as const;
 /** Profile storage unit for root grants. Storage units must match /^[a-z][a-z0-9_]*$/. */
 export const STORAGE_NAMESPACE = 'local_file_manager' as const;

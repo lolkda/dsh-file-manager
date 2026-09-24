@@ -419,7 +419,14 @@ export function ReferenceDialog({ t, ui, busy, errorText, error, plan, sessionId
           </select>
         </label>
         <div style={{ maxHeight: '30vh', overflow: 'auto', overflowWrap: 'anywhere' }}>
-          {plan.map(entry => <div key={entry.mention}>{entry.mention}</div>)}
+          {/*
+            The plan is an immutable snapshot of the Host's answers: it is replaced
+            wholesale when the dialog opens and never reordered or extended, so the
+            row's position is its stable identity. The mention cannot serve as the
+            key — a Host answer may omit it or repeat it for two selected entries,
+            and either would leave React without a usable identity.
+          */}
+          {plan.map((entry, index) => <div key={index}>{entry.mention}</div>)}
         </div>
         {error ? <div role="alert">{errorText(error)}</div> : null}
       </div>

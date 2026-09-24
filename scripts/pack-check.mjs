@@ -35,6 +35,7 @@ if (!existsSync(path.join(root, 'host', 'native', 'rename-no-replace'))) {
   fail('host/native/rename-no-replace is missing; run npm run build:native first');
 }
 
+mkdirSync(outDir, { recursive: true });
 const packed = execFileSync('npm', ['pack', '--ignore-scripts', '--pack-destination', outDir], {
   cwd: root,
   encoding: 'utf8',

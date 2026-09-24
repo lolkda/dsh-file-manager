@@ -45,8 +45,6 @@ async function fixture(t, { filename = '下载说明.txt', bytes = Buffer.from('
   ctx.provide('storage', { backend: registry });
   const domains = new DomainFacility(ctx, { backend: 'json', routes: {} });
   ctx.provide('storageDomain', domains);
-  const settings = new Map();
-  ctx.provide('settings', { register(name, schema) { settings.set(name, schema()); }, get(name) { return settings.get(name); } });
   ctx.provide('workspaceRegistry', { list: () => [] });
   // Only credential persistence is test-owned. Connection itself mints/verifies
   // real signed cookies; no user token or OS credential store is read.

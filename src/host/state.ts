@@ -3,7 +3,7 @@ import { z } from 'zod';
 import Schema from '@deepseek-ai/schemastery';
 import { FileManagerError } from '../contracts/errors.js';
 import {
-  LIMIT_BOUNDS, LIMIT_DEFAULTS, OPERATIONS_STORAGE_NAMESPACE, SETTINGS_NAMESPACE, STORAGE_NAMESPACE,
+  LIMIT_BOUNDS, LIMIT_DEFAULTS, OPERATIONS_STORAGE_NAMESPACE, STORAGE_NAMESPACE,
   type LimitName, type ProfileLimits,
 } from '../contracts/limits.js';
 import type { PluginContext, StorageDomainHandle } from './context.js';
@@ -24,13 +24,19 @@ const rootStateSchema = z.object({
   roots: z.array(rootSchema),
 }).strict().refine(state => new Set(state.roots.map(root => root.id)).size === state.roots.length);
 
-/** One settings field per frozen limit, described by the limit contract itself. */
+/** One config field per frozen limit, described by the limit contract itself. */
 function limitField(name: LimitName) {
   const bounds = LIMIT_BOUNDS[name];
   return Schema.natural().min(bounds.min).max(bounds.max).default(LIMIT_DEFAULTS[name]).description(bounds.description);
 }
 
-const limitsSchema = Schema.object({
+/**
+ * The plugin's Loader `Config`. DSH 0.1.7-rc.1 validates the profile row's
+ * `config` against this schema — materializing every default, and refusing an
+ * out-of-bounds value instead of clamping it — and hands the result to
+ * `apply(ctx, config)`. The plugin module re-exports it as `Config`.
+ */
+export const LIMITS_CONFIG = Schema.object({
   maxTextBytes: limitField('maxTextBytes'),
   maxFileBytes: limitField('maxFileBytes'),
   maxTaskBytes: limitField('maxTaskBytes'),
@@ -42,7 +48,6 @@ const limitsSchema = Schema.object({
 });
 
 export interface ProfileState {
-  limits: ProfileLimits;
   managerOptions: {
     initialRoots: RootDescriptor[];
     maxTextBytes: number;
@@ -53,10 +58,13 @@ export interface ProfileState {
   close(): Promise<void>;
 }
 
-/** Open profile-owned metadata through DSH, without writing a separate config file. */
-export async function openProfileState(ctx: PluginContext): Promise<ProfileState> {
-  ctx.settings.register(SETTINGS_NAMESPACE, limitsSchema, { applies: 'restart' });
-  const limits = ctx.settings.get(SETTINGS_NAMESPACE);
+/**
+ * Open profile-owned metadata through DSH, without writing a separate config file.
+ *
+ * `limits` is the already-resolved configuration the caller owns (from the
+ * plugin's Loader `Config`); this adapter never reads configuration itself.
+ */
+export async function openProfileState(ctx: PluginContext, limits: ProfileLimits): Promise<ProfileState> {
   const domain = await ctx.storageDomain.open({
     name: STORAGE_NAMESPACE,
     version: 1,
@@ -66,7 +74,6 @@ export async function openProfileState(ctx: PluginContext): Promise<ProfileState
   });
   const stored = domain.global.get() as { roots: RootDescriptor[] };
   return {
-    limits,
     managerOptions: {
       initialRoots: stored.roots,
       maxTextBytes: limits.maxTextBytes,

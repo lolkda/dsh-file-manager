@@ -74,11 +74,6 @@ test('Host plugin mounts exact authenticated Fetch routes and contributes no Age
   const ctx = {
     connection: { fetch: { register(route) { routes.push(route); return async () => routes.splice(routes.indexOf(route), 1); } } },
     workspaceRegistry: { list: () => [] },
-    settings: {
-      value: undefined,
-      register(ns, schema) { this.value = schema(); },
-      get() { return this.value; },
-    },
     storageDomain: { async open(spec) {
       let state = structuredClone(spec.global.initial);
       const tables = new Map();

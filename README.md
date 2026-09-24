@@ -4,7 +4,9 @@
 
 ## 当前版本与验证状态
 
-- 当前版本：**0.2.8**（TypeScript 结构性重构代次）。本代次在**独立副本** `dsh-file-manager-ts/` 中进行：原始项目 `dsh-file-manager/` 全程只读，不在其中运行测试、构建或修改文件。0.2.8 发布前已重新通过 `npm run check`（类型检查、构建与产物语法检查）、`npm run build:native` 与全量 **518 项测试（0 失败、0 跳过）**；公开发布状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager/v/0.2.8) 为准。
+当前本地适配版为 **0.2.9-rc.1**，面向 DSH **0.1.7-rc.1**；已通过类型检查、构建、531 项回归及 tarball 校验，没有发布到公共 registry。包含原生 Config 初始化修复、引用预览列表 key 修复及干净克隆下的打包目录初始化。下方保留旧版本验证记录。
+
+- GitHub 基线版本：**0.2.8**（TypeScript 结构性重构代次）。本代次在**独立副本** `dsh-file-manager-ts/` 中进行：原始项目 `dsh-file-manager/` 全程只读，不在其中运行测试、构建或修改文件。0.2.8 发布前已重新通过 `npm run check`（类型检查、构建与产物语法检查）、`npm run build:native` 与全量 **518 项测试（0 失败、0 跳过）**；公开发布状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager/v/0.2.8) 为准。
 - 重构前的副本基线（改动前实测）：`npm test` **329/329 通过、0 跳过**，`npm run check` 与 `npm run build:native` 通过。该基线是本次重构的等价性红线。
 - 0.1.4 发布快照：`artifacts/local-dsh-file-manager-0.1.4.tgz`，SHA-256：`96a7c542331d81c860a002ce9be8ea5f27103d87fb70ca3423170162b182bce1`。
 - 0.1.3 安装时返回 `restart-required`；用户后续截图已显示默认 `/` 与文本预览，并发现旧下载记录缺少关闭入口。该版实际安装模块通过 4 项 HTTP 与 4 项 Storage 回归。本次 0.1.4 的安装保存与运行时激活单独核对。
@@ -15,6 +17,13 @@
 - 0.1.2 快照：`artifacts/local-dsh-file-manager-0.1.2.tgz`，SHA-256：`531f76445c7133649f490aba0c8f6104e1cb907cae20f772130a1d3c2ef5d7e7`。打包后 5 项 UI 与 4 项真实存储回归均通过；与 0.1.1 比较确认所有 Host I/O 实现字节未变，Host 入口仅更新版本号。
 - 0.1.1 的解包快照及实际安装目录均以 `agent (1000:1000)` 在新 Node 进程中通过 4 项真实后端回归。安装快照：`artifacts/local-dsh-file-manager-0.1.1.tgz`，SHA-256：`9a1aa07df33282ea0a137876c162aad0ce2ca9957e629acb5caaacdf5284627f`。
 - 以上 `artifacts/**/*.tgz` 与 `artifacts/ts-refactor/` 下的日志均为**本机历史快照与证据文件**（`artifacts/` 已被 `.gitignore` 忽略），仓库与 npm 包内**不提供下载**；需要复核时在本机用 `npm pack` 与对应测试重新生成。
+
+### DSH 0.1.7-rc.1 兼容修复
+
+- 新版 DSH 不再提供 `SettingsProvider.register/get`。资源限制改由插件导出的 `Config` schema 校验，并通过 `local-file-manager` bundle entry 的 `config:` 传入；不配置时保留全部原默认值。
+- 修复旧版初始化异常被降级路径捕获、导致面板看似加载但文件功能不可用的问题。根授权、任务日志的存储单元和数据格式不变，Client 的面包屑与文件操作逻辑不变。
+- 新增 10 项配置回归；修复后已在 `0.1.6-alpha.2` 与 `0.1.7-rc.1` 的真实 Connection/Storage 运行时各通过 528 项测试。完整 Web 组合的冷启动和页面结果由安装态验收另行记录。
+- 已有旧 `settings.yaml` 中的 `local-file-manager` 限制值应在升级前迁入同名 entry 的 `config:`。新版原生 Settings 自动导入只接受 volatile 字段，而这些启动期限制是普通 Config 字段；不能把导入警告当成成功。此次部署未发现该旧段。
 
 ### 0.2.8 深路径面包屑修复
 
@@ -97,7 +106,7 @@
 | 修改请求重试窗口 | 10 分钟，最多 256 条 |
 | 小控制请求 / 大清单请求 | 256 KiB / 16 MiB |
 
-资源设置登记在 DSH `local-file-manager` namespace，修改后重启生效。ZIP 元数据开销另计入 `wireBytesTransferred`；服务端流完成不表示浏览器已将文件写入磁盘。
+资源限制由 `local-file-manager` entry 的 `config:` 配置，插件导出的 `Config` schema 补全缺省值并拒绝越界值；不再注册独立 Settings namespace。这些启动期限制在插件重新挂载后生效。Profile patch 的 `config:` 覆盖是完整对象替换：保留所有希望继续生效的自定义字段，省略的字段会恢复 schema 默认值，并非必须手工填写全部 8 项。ZIP 元数据开销另计入 `wireBytesTransferred`；服务端流完成不表示浏览器已将文件写入磁盘。
 
 ## 环境与构建
 

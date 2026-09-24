@@ -320,14 +320,14 @@ Client 约定：`ready` 触发一次重同步；溢出时服务端清队列并�
 
 | 用途 | 命名 |
 | --- | --- |
-| Settings 命名空间（kebab-case） | `local-file-manager` |
+| Loader 配置 entry id（kebab-case；不再调用 Settings.register） | `local-file-manager` |
 | 根授权存储单元（snake_case） | `local_file_manager` |
 | 操作日志存储单元 | `local_file_manager_operations` |
 | bundle 单元 id | `local-file-manager` |
 | bootstrap `stage` | `basic-management` |
 | bootstrap `version` | 必须等于已安装包的 `package.json` 版本 |
 
-设置项键名沿用既有 7 项，并新增 `maxVerificationBytes`；`transferConcurrency` 的含义更新为「重 IO 同时许可数」（复制/移动/上传/下载/全文核验共用一个调度器）。
+限制字段沿用既有 7 项并包含 `maxVerificationBytes`，由插件导出的 `Config` schema 校验 entry 的 `config:`；省略字段恢复默认值，完整配置覆盖时需保留所有希望继续生效的自定义字段。`transferConcurrency` 表示重 IO 同时许可数（复制/移动/上传/下载/全文核验共用一个调度器）。普通启动期限制不属于 volatile 表单字段；旧 `local-file-manager` Settings 段若存在，应在升级前显式迁移，不能忽略导入拒绝。
 
 ---
 

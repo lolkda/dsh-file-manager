@@ -7,6 +7,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { LIMIT_DEFAULTS, resolveLimits } from '../dist/contracts/limits.js';
 import { openOperationState, openProfileState } from '../dist/host/state.js';
 import { createManager } from '../dist/host/manager.js';
 import { apply } from '../dist/index.js';
@@ -37,17 +38,12 @@ async function fixture(t) {
     const registry = new BackendRegistry();
     registry.register('json', backend);
     const emitter = new EventEmitter();
-    const settings = new Map();
     const disposers = [];
     const routes = new Map();
     const ctx = {
       storage: { backend: registry },
       emit: emitter.emit.bind(emitter),
       logger: { warn: console.warn, error: console.error },
-      settings: {
-        register(name, schema) { settings.set(name, schema()); },
-        get(name) { return settings.get(name); },
-      },
       workspaceRegistry: { list: () => [] },
       connection: { fetch: { register(route) { routes.set(route.path, route); return async () => routes.delete(route.path); } } },
       effect(callback) { const dispose = callback(); disposers.push(dispose); return dispose; },
@@ -56,7 +52,7 @@ async function fixture(t) {
     ctx.storageDomain = domains;
     let closing;
     const instance = {
-      ctx, routes, settings,
+      ctx, routes,
       close() {
         return closing ??= (async () => {
           for (const dispose of disposers.reverse()) await dispose?.();
@@ -186,15 +182,15 @@ test('the deployed JSON storage accepts root metadata and restores an explicit g
   const { files, boot } = await fixture(t);
   const first = boot();
   let state;
-  await assert.doesNotReject(async () => { state = await openProfileState(first.ctx); }, 'root storage declarations must satisfy the deployed backend contract');
-  assert.ok(first.settings.has('local-file-manager'), 'the Settings namespace must remain kebab-case');
+  await assert.doesNotReject(async () => { state = await openProfileState(first.ctx, resolveLimits()); }, 'root storage declarations must satisfy the deployed backend contract');
+  assert.equal(state.managerOptions.maxTextBytes, LIMIT_DEFAULTS.maxTextBytes, 'the adapter carries the caller-resolved limits');
   const manager = createManager(state.managerOptions);
   const grant = await manager.addRoot({ path: files });
   await manager.close();
   await state.close();
   await first.close();
   const second = boot();
-  const reopened = await openProfileState(second.ctx);
+  const reopened = await openProfileState(second.ctx, resolveLimits());
   const restored = createManager(reopened.managerOptions);
   assert.equal(restored.listRoots()[0].id, grant.id);
   await restored.close();
@@ -221,7 +217,7 @@ test('the deployed JSON storage durably preserves operation checkpoints and tran
 test('the full Host plugin mounts against deployed storage and persists its root through teardown and restart', { skip: skipWithoutRuntime }, async t => {
   const { files, boot } = await fixture(t);
   const first = boot();
-  await assert.doesNotReject(() => apply(first.ctx), 'a valid Host composition must not fail during storage initialization');
+  await assert.doesNotReject(() => apply(first.ctx, { maxTextBytes: 4096 }), 'a valid Host composition must not fail during storage initialization');
   assert.equal(first.routes.size, 6, 'the frozen v2 route table registers six routes');
   const call = async (instance, payload) => {
     const response = await instance.routes.get('/api/file-manager/v2/control').fetch(new Request('http://localhost/api/file-manager/v2/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }));
@@ -234,10 +230,11 @@ test('the full Host plugin mounts against deployed storage and persists its root
   assert.equal(await readFile(path.join(files, 'created.txt'), 'utf8'), '');
   await first.close();
   const second = boot();
-  await apply(second.ctx);
+  await apply(second.ctx, { maxTextBytes: 4096 });
   const bootstrap = await call(second, { op: 'bootstrap' });
   assert.equal(bootstrap.roots[0].id, grant.id);
   assert.equal(bootstrap.capabilities.persistentRoots, true);
   assert.equal(bootstrap.capabilities.tasks, true);
   assert.equal(bootstrap.capabilities.transfers, true);
+  assert.equal(bootstrap.limits.maxTextBytes, 4096, 'the Loader config row is what the mounted surface serves');
 });

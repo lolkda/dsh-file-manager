@@ -1,10 +1,10 @@
-import { HEAVY_IO_QUEUE_LIMIT } from './contracts/limits.js';
+import { HEAVY_IO_QUEUE_LIMIT, resolveLimits, type ProfileLimitsInput } from './contracts/limits.js';
 import { FileManagerError } from './contracts/errors.js';
 import type { DegradedView } from './contracts/views.js';
 import { createFileManagerRouter, createUnavailableHandler, ROUTE_TABLE } from './host/http.js';
 import { createHeavyIoScheduler } from './host/scheduler.js';
 import { createManager } from './host/manager.js';
-import { openOperationState, openProfileState, type OperationState, type ProfileState } from './host/state.js';
+import { LIMITS_CONFIG, openOperationState, openProfileState, type OperationState, type ProfileState } from './host/state.js';
 import { createTaskService } from './host/tasks.js';
 import { createTransferService } from './host/transfers.js';
 import { createEventHub, createWatchService } from './host/watch.js';
@@ -15,7 +15,15 @@ import { VERSION } from './version.js';
 export { VERSION };
 export { createControlHandler, createEventHandler, createFileManagerRouter, createTextHandler } from './host/http.js';
 
-export const inject = ['connection', 'workspaceRegistry', 'storageDomain', 'settings'];
+/**
+ * The plugin's Loader `Config`. DSH 0.1.7-rc.1 replaced the runtime
+ * `settings.register(namespace, schema)` call with this declaration: the Loader
+ * validates a profile row's `config` against `Config` and passes the resolved
+ * values to {@link apply}. A row without `config` gets the contract defaults.
+ */
+export { LIMITS_CONFIG as Config };
+
+export const inject = ['connection', 'workspaceRegistry', 'storageDomain'];
 
 function causeCodeOf(error: unknown): string {
   const code = (error as FileManagerError | undefined)?.code;
@@ -41,11 +49,17 @@ function registerUnavailable(ctx: PluginContext, degraded: DegradedView): void {
   }
 }
 
-/** Host-owned resources dispose in reverse order: routes, writes, then durable storage. */
-export async function apply(ctx: PluginContext): Promise<void> {
+/**
+ * Host-owned resources dispose in reverse order: routes, writes, then durable storage.
+ *
+ * `config` is the Loader-validated row configuration; the resolved limits are
+ * the only configuration this plugin has.
+ */
+export async function apply(ctx: PluginContext, config: ProfileLimitsInput = {}): Promise<void> {
+  const limits = resolveLimits(config);
   let profile: ProfileState | undefined;
   try {
-    profile = await openProfileState(ctx);
+    profile = await openProfileState(ctx, limits);
   } catch (error) {
     // Unusable root grants make every file operation unsafe: refuse the whole surface.
     const causeCode = causeCodeOf(error);
@@ -59,7 +73,6 @@ export async function apply(ctx: PluginContext): Promise<void> {
   }
   const opened = profile;
   ctx.effect(() => () => opened.close());
-  const limits = opened.limits;
   // One heavy-IO budget for copies, moves, uploads, downloads and verification.
   const scheduler = createHeavyIoScheduler({ concurrency: limits.transferConcurrency, queueLimit: HEAVY_IO_QUEUE_LIMIT });
   const manager = createManager({ ...opened.managerOptions, scheduler });

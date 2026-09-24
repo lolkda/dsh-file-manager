@@ -255,8 +255,6 @@ test('R19: download stays an authenticated GET with a streamed response', { skip
   ctx.provide('storage', { backend: registry });
   const domains = new DomainFacility(ctx, { backend: 'json', routes: {} });
   ctx.provide('storageDomain', domains);
-  const settings = new Map();
-  ctx.provide('settings', { register(name, schema) { settings.set(name, schema()); }, get(name) { return settings.get(name); } });
   ctx.provide('workspaceRegistry', { list: () => [] });
   let credential;
   ctx.provide('credentials', { async modifyRecord(_key, mutate) { const next = await mutate(credential); if (next !== undefined) credential = next; return credential; } });

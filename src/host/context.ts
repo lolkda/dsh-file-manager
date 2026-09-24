@@ -3,7 +3,6 @@
  * so the plugin never imports a Host implementation type, and so tests can pass
  * a small fake context.
  */
-import type { ProfileLimits } from '../contracts/limits.js';
 
 export interface PluginLogger {
   error?(message: string): void;
@@ -33,12 +32,6 @@ export interface WorkspaceRegistryService {
   list(): WorkspaceCandidateView[];
 }
 
-export interface SettingsService {
-  /** `schema` is a schemastery schema; the Host calls it to materialize defaults. */
-  register(namespace: string, schema: unknown, options?: { applies?: string }): void;
-  get(namespace: string): ProfileLimits;
-}
-
 export interface StorageTable {
   entries(): IterableIterator<[string, unknown]>;
   put(key: string, value: unknown): Promise<void>;
@@ -66,7 +59,6 @@ export interface PluginContext {
   logger?: PluginLogger | undefined;
   connection: ConnectionService;
   workspaceRegistry: WorkspaceRegistryService;
-  settings: SettingsService;
   storageDomain: StorageDomainService;
   /** Registers a Host-owned resource; the callback returns its disposer. */
   effect(callback: () => unknown): unknown;
