@@ -19,6 +19,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The version agreement is checked with the same Node the published artifact
+      # is built with, so the gate cannot pass on a runtime the build does not
+      # support.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
       - name: Require the tag and package.json to agree with the built entrypoint
         id: agreement
         run: |
@@ -45,6 +53,13 @@ jobs:
     # A manual run on a branch verifies the release without publishing it.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    # Trusted publishing: the registry accepts a short-lived token minted from this
+    # job's OIDC identity, so the job asks for `id-token: write` and nothing beyond
+    # reading its own contents. No stored credential is read anywhere in this
+    # workflow, and a missing one can no longer turn a release into a silent skip.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -52,44 +67,42 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          cache: npm
+
+      # Trusted publishing needs npm >= 11.5.1 (Node >= 22.14); the npm a runner
+      # image happens to bundle is not guaranteed to be that new, so a known-good
+      # version is installed instead of assumed.
+      - name: Install the npm that supports trusted publishing
+        run: npm install --global npm@11.19.0
 
       - name: Install dependencies
         run: npm ci
 
       # `npm publish` runs prepublishOnly (check, build:native, test); two of
-      # those suites need a real DSH, so install one and prove it resolves.
+      # those suites need a real DSH, so install the version this release targets
+      # and prove it resolves. An older runtime would skip the 0.1.7-rc.1 evidence
+      # instead of failing.
       - name: Install the DSH runtime the integration suites resolve
         env:
-          DSH_RUNTIME_VERSION: 0.1.6-alpha.2
+          DSH_RUNTIME_VERSION: 0.1.7-rc.1
         run: |
           npm install --global "@deepseek-ai/dsh@${DSH_RUNTIME_VERSION}"
-          echo "FILE_MANAGER_DSH_RUNTIME_ROOT=$(npm root -g)/@deepseek-ai/dsh" >> "$GITHUB_ENV"
+          root="$(npm root -g)/@deepseek-ai/dsh"
+          echo "FILE_MANAGER_DSH_RUNTIME_ROOT=${root}" >> "$GITHUB_ENV"
+          echo "FILE_MANAGER_DSH_017_RUNTIME_ROOT=${root}" >> "$GITHUB_ENV"
 
       - name: Assert the integration suites can resolve the DSH runtime
         run: |
           set -euo pipefail
-          test -f "${FILE_MANAGER_DSH_RUNTIME_ROOT}/package.json" || {
-            echo "::error::no DSH runtime at ${FILE_MANAGER_DSH_RUNTIME_ROOT}; refusing to publish behind a silently weakened gate"
-            exit 1
-          }
+          for variable in FILE_MANAGER_DSH_RUNTIME_ROOT FILE_MANAGER_DSH_017_RUNTIME_ROOT; do
+            test -f "${!variable}/package.json" || {
+              echo "::error::no DSH runtime at ${!variable} (${variable}); refusing to publish behind a silently weakened gate"
+              exit 1
+            }
+          done
 
       # `npm publish` runs prepublishOnly (check, build:native, test), so an
-      # unverifiable build cannot reach the registry.
-      - name: Detect npm credentials
-        id: credentials
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -n "${NODE_AUTH_TOKEN}" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Publish skipped::NPM_TOKEN is not configured for this repository, so v${{ needs.verify-version.outputs.version }} was verified but not published."
-          fi
-
+      # unverifiable build cannot reach the registry. The publish identity is this
+      # job's OIDC token; provenance is generated automatically because both the
+      # repository and the package are public, so no extra flag is passed.
       - name: Publish @lolkda/dsh-file-manager
-        if: steps.credentials.outputs.available == 'true'
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

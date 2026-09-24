@@ -64,6 +64,30 @@ export const PANEL_CSS = `
 .dsh-fm-dialog .fm-paste-policy-trigger>svg{flex:none;color:var(--dsw-alias-label-secondary)}
 .dsh-fm-dialog .fm-paste-policy-trigger:focus-visible{outline:none;border-color:var(--dsw-alias-brand-primary)}
 .dsh-fm-dialog .fm-paste-policy-trigger[aria-expanded=true]{border-color:var(--dsw-alias-brand-primary)}
+/* R21 code editor. The container fills the preview column where the legacy
+   <pre>/<textarea> sat. This sheet declares layout and typography only: token
+   colours come from the theme package's --shiki-* / --dsw-* variables, so a
+   theme switch keeps working and no literal colour enters this file. The legacy
+   .fm-editor and .fm-preview pre rules above stay in place — the editor's
+   initialization-failure fallback renders those very controls. */
+.dsh-fm [data-fm-code]{flex:1;min-height:160px;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+/* CodeMirror mounts into an unmarked .fm-code-mount child, so the mount is the
+   level that has to grow: stretching .cm-editor alone leaves it short by whatever
+   the note and language rows above it take, and the panel's own overflow then
+   clips the editor instead of scrolling it. An error-state fallback renders no
+   mount at all (component contract), and we deliberately do NOT hide an empty
+   mount with :empty{display:none}: React commits the empty mount before the
+   mount effect appends CodeMirror, and measuring inside a display:none parent
+   would give the editor a zero-height viewport. (No backticks anywhere in this
+   stylesheet: PANEL_CSS is a template literal.) */
+.dsh-fm [data-fm-code] .fm-code-mount{display:flex;flex:1;min-height:0;min-width:0;overflow:hidden}
+.dsh-fm [data-fm-code] .cm-editor{flex:1;min-height:0;background:transparent}
+.dsh-fm [data-fm-code] .cm-editor.cm-focused{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
+.dsh-fm [data-fm-code] .cm-scroller{overflow:auto;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2}
+.dsh-fm [data-fm-code] .cm-content{padding:16px;white-space:pre}
+.dsh-fm [data-fm-code] .cm-gutters{border:0;background:transparent;color:var(--dsw-alias-label-secondary)}
+.dsh-fm .fm-code-language,.dsh-fm .fm-code-note{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;padding:6px 16px 0}
+.dsh-fm .fm-code-language{white-space:nowrap}
 @media(max-width:1100px){.dsh-fm .fm-layout{grid-template-columns:180px minmax(230px,1fr);overflow:auto}.dsh-fm .fm-preview{grid-column:1/-1;border-top:1px solid var(--dsw-alias-border-l1);min-height:270px;max-height:55vh}.dsh-fm .fm-files,.dsh-fm aside{min-height:220px}.dsh-fm footer span:last-child{display:none}}
 @media(max-width:650px){.dsh-fm header{padding:16px}.dsh-fm .fm-layout{display:flex;flex-direction:column}.dsh-fm aside{min-height:0;max-height:200px;border-right:0;border-bottom:1px solid var(--dsw-alias-border-l1)}.dsh-fm .fm-files{min-height:240px}.dsh-fm .fm-preview{flex:1;max-height:none}.fm-compare{grid-template-columns:1fr}}
 `;

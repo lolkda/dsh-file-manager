@@ -7,9 +7,9 @@
  * the abort controllers and every slot the plugin owns.
  *
  * The module also exports its building blocks (`documents`, `activity`, `sse`,
- * `i18n`, `api`) so the test suite can exercise the shipped artifact directly.
- * They are the plugin's own modules — no internal state, and no recovery proof
- * from the Host, is exposed here.
+ * `i18n`, `api`, `editor`, `codeLanguages`) so the test suite can exercise the
+ * shipped artifact directly. They are the plugin's own modules — no internal
+ * state, and no recovery proof from the Host, is exposed here.
  */
 
 import * as api from './api.js';
@@ -17,6 +17,8 @@ import * as documents from './documents.js';
 import * as activity from './activity.js';
 import * as sse from './sse.js';
 import * as i18n from './i18n.js';
+import * as editor from './code-editor.js';
+import * as codeLanguages from './code-languages.js';
 import { createDocumentStore } from './documents.js';
 import { createActivityStore } from './activity.js';
 import { en, NS, zh, type Translate } from './i18n.js';
@@ -25,12 +27,13 @@ import { Panel, type PanelRuntime } from './panel.js';
 import { ReferenceBridge, type ReferenceRecord, type ReferenceScope } from './reference.js';
 import primitives from '@deepseek-ai/dsh-client-ui-primitives';
 
-export { api, documents, activity, sse, i18n };
+export { api, documents, activity, sse, i18n, editor, codeLanguages };
 // Named factories the component suites use directly, alongside the namespace
 // exports above. They expose no internal state — only the public constructors.
 export { createDocumentStore } from './documents.js';
 export { createActivityStore } from './activity.js';
 export { consumeEvents } from './sse.js';
+export { CodeEditor } from './code-editor.js';
 
 export interface ClientContext {
   readonly slots: {

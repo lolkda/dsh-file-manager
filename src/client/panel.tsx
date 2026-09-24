@@ -23,6 +23,7 @@ import type { ActivityStore } from './activity.js';
 import { activityCounts, canDismissActivity, isActivityRunning } from './activity.js';
 import type { DocumentStore, OpenDocument } from './documents.js';
 import { AttemptSlot, type UiPrimitives } from './ui.js';
+import { CodeEditor } from './code-editor.js';
 import { PANEL_CSS } from './styles.js';
 import {
   EMPTY_LISTING, FileSection, applyPage, type FileActions, type FileCapabilities,
@@ -493,6 +494,10 @@ export function Panel(props: PanelProps): ReactNode {
 
   // A degraded Host must not present an unusable capability as usable, and an
   // unavailable history must never be rendered as "no tasks".
+  //
+  // Every write entry point reads `allowed.write` — the editor and its edit/save
+  // buttons included — so no degradation path can leave one of them offering a
+  // write the others refuse.
   const degradedScope = degraded?.scope ?? null;
   const allowed: FileCapabilities & { watch?: boolean; taskHistory?: boolean; persistentRoots?: boolean } = {
     ...capabilities,
@@ -919,6 +924,26 @@ export function Panel(props: PanelProps): ReactNode {
 
   const dialogContext = { t, ui, busy: busy > 0, errorText };
 
+  /**
+   * The code editor's props, derived during render rather than cached: a rename
+   * or a mode switch re-reads the current path, so the language hint can never
+   * come from a stale one. Both modes carry the same LF-normalized draft — BOM
+   * and line endings stay with `base` and the Host save chain — and the write
+   * gate is the same `allowed.write` every other entry point uses.
+   */
+  const activeEditor = active ? {
+    documentId: active.id,
+    path: active.path,
+    value: active.draft,
+    mode: active.editing ? ('edit' as const) : ('preview' as const),
+    canWrite: allowed.write === true,
+    languageHint: ui.languageForPath?.(active.path),
+    ariaLabel: `${t('editor')}: ${active.path}`,
+    t,
+    onChange: (text: string) => documents.edit(active.id, text),
+    onSave: () => save(active.id),
+  } : null;
+
   return (
     <section className="dsh-fm" aria-label={t('title')} data-fm-version={__FM_VERSION__}>
       <style>{PANEL_CSS}</style>
@@ -999,23 +1024,16 @@ export function Panel(props: PanelProps): ReactNode {
             <span className="fm-preview-title" title={active?.path}>{active?.path || t('preview')}</span>
             {active ? (
               <div className="fm-actions">
-                {!active.editing ? button('edit', { disabled: !capabilities.write || active.missing, onClick: () => documents.edit(active.id, active.draft), 'data-fm-action': 'edit' }) : null}
-                {active.editing ? button(active.saving ? 'saving' : 'save', { variant: 'primary', disabled: !capabilities.write || !active.dirty || active.saving || active.missing, onClick: () => save(active.id), 'data-fm-action': 'save' }) : null}
+                {!active.editing ? button('edit', { disabled: !allowed.write || active.missing, onClick: () => documents.edit(active.id, active.draft), 'data-fm-action': 'edit' }) : null}
+                {active.editing ? button(active.saving ? 'saving' : 'save', { variant: 'primary', disabled: !allowed.write || !active.dirty || active.saving || active.missing, onClick: () => save(active.id), 'data-fm-action': 'save' }) : null}
                 {button('closeDocument', { disabled: active.saving, onClick: () => closeDocument(active.id), 'data-fm-action': 'close-document' })}
               </div>
             ) : null}
           </div>
           {active?.missing ? <div className="fm-error" data-fm-missing>{t('missing')}</div> : null}
           {active?.external ? <div className="fm-notice" data-fm-external-change>{t('external')}{' '}{button('compare', { onClick: () => setConflictId(active.id) })}</div> : null}
-          {active
-            ? (active.editing
-              ? <textarea
-                className="fm-editor" data-fm-editor aria-label={`${t('editor')}: ${active.path}`} value={active.draft}
-                readOnly={!capabilities.write} spellCheck={false}
-                onChange={event => documents.edit(active.id, event.target.value)}
-                onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save(active.id); } }}
-              />
-              : <pre data-fm-preview="text">{active.base.text}</pre>)
+          {activeEditor
+            ? <CodeEditor {...activeEditor} />
             : <div className="fm-placeholder">{t('selectFile')}</div>}
           {active ? (
             <footer>

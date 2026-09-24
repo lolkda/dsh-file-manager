@@ -33,6 +33,14 @@ export interface UiPrimitives {
   readonly Modal: ComponentType<PrimitiveProps>;
   readonly Checkbox: ComponentType<PrimitiveProps>;
   readonly RiskConfirmation: ComponentType<PrimitiveProps>;
+  /**
+   * Host-public filename→grammar selection for the code editor. Optional because
+   * a Host composed without the primitives' code-highlighting surface must keep
+   * working: the panel then passes `undefined` and the editor shows plain text.
+   * The panel never derives a grammar itself — the hint is the Host's answer, or
+   * nothing at all.
+   */
+  readonly languageForPath?: ((path: string) => string | undefined) | undefined;
 }
 
 /**

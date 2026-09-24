@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { access, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { act, loadClient, node, nodes, setup, textOf } from './client-harness.mjs';
+import { act, editorEdit, editorProps, loadClient, node, nodes, setup, textOf } from './client-harness.mjs';
 
 // These are activity-model and actual React component tests, not a mock page.
 // Wire snapshots below exercise Client contract races independently of the
@@ -214,7 +214,7 @@ test('finalizing terminal activities keep refreshing until canDismiss becomes tr
 test('collapsing keeps task counts, editor state and event subscription alive', async t => {
   const { view, events } = await historyPanel(t, { watch: true, taskRecords: [taskSnapshot({ status: 'running', canDismiss: false })] });
   await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'draft remains mounted' } }));
+  editorEdit(view, 'draft remains mounted');
   const stream = events.at(-1);
   await view.click({ 'data-fm-history-action': 'toggle' });
   assert.equal(node(view.renderer, { 'data-fm-task-cards': true }).props.hidden, true);
@@ -222,7 +222,7 @@ test('collapsing keeps task counts, editor state and event subscription alive', 
   assert.equal(nodes(view.renderer, { 'data-fm-active-count': 1 }).length, 1);
   assert.equal(stream.signal.aborted, false);
   assert.equal(stream.cancelled, false);
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'draft remains mounted');
+  assert.equal(editorProps(view.renderer)?.value, 'draft remains mounted');
   await view.click({ 'data-fm-history-action': 'toggle' });
   assert.equal(node(view.renderer, { 'data-fm-task-cards': true }).props.hidden, false);
 });

@@ -98,6 +98,44 @@ export const node = (renderer, props) => {
 export const textOf = element => element.children.map(child => typeof child === 'string' ? child : textOf(child)).join('');
 
 /**
+ * The panel's code-editor boundary.
+ *
+ * The panel renders exactly one component element carrying the frozen
+ * `CodeEditorProps`, wrapped in a React container that carries the
+ * `data-fm-code*` marks. Under React's test renderer a host ref is never
+ * attached, so the component runs its documented no-view lifecycle: container
+ * and marks render, no CodeMirror instance exists, and the failure fallback is
+ * deliberately unreachable. These helpers therefore read that component's props
+ * and the marks React itself renders — never a rendered editor surface. The real
+ * `.cm-content`, its colour spans and actual typing belong to the jsdom suite.
+ *
+ * They return `undefined`/`0` rather than asserting, so each caller's own
+ * assertion names the business rule it protects.
+ */
+export const editorNodes = renderer => renderer.root.findAll(node =>
+  typeof node.type === 'function'
+  && typeof node.props === 'object' && node.props !== null
+  && 'documentId' in node.props && 'languageHint' in node.props && typeof node.props.onChange === 'function');
+export const editorProps = renderer => editorNodes(renderer)[0]?.props;
+export const editorCount = renderer => editorNodes(renderer).length;
+export const editorContainers = renderer => renderer.root.findAll(node =>
+  typeof node.type === 'string' && 'data-fm-code' in node.props);
+
+/**
+ * Delivers text through the editor's own change callback, wrapped in `act`.
+ *
+ * A missing editor must be reported as the missing behavior it is: calling
+ * `undefined.onChange` would crash a test instead of failing it, so this helper
+ * asserts the boundary exists first. Callers keep their own assertions about
+ * what the panel then does with the text.
+ */
+export const editorEdit = (view, text) => {
+  const props = editorProps(view.renderer);
+  assert.ok(props, 'the panel must render the code editor before it can receive text');
+  act(() => props.onChange(text));
+};
+
+/**
  * Boots the real Host services, mounts the shipped Client bundle against the v2
  * router, and exposes the interaction helpers the component tests use.
  */

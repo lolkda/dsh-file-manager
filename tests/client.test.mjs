@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { access, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { act, loadClient, node, nodes, setup, textOf, uiBoundary, React, TestRenderer, snapshotBoundary } from './client-harness.mjs';
+import { act, editorContainers, editorCount, editorEdit, editorProps, loadClient, node, nodes, setup, textOf, uiBoundary, React, TestRenderer, snapshotBoundary } from './client-harness.mjs';
+import { loadClientModule } from './client-module-loader.mjs';
 
 // ABI/component tests use React's official renderer and the real Host handlers.
 // They are not visual previews or substitutes for installed Web UI verification.
@@ -103,9 +104,9 @@ test('all text snapshots use the control POST rather than the unsupported text G
   await view.openHello();
   assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/v2/text') && item.init.method === 'GET'), false);
   assert.ok(view.requests.some(item => item.url === '/api/file-manager/v2/control' && JSON.parse(item.init.body).op === 'text.read'));
-  assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '<script>not executable</script>\n你好');
+  assert.equal(editorProps(view.renderer)?.value, '<script>not executable</script>\n你好');
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'verified after save' } }));
+  editorEdit(view, 'verified after save');
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'verified after save');
   assert.ok(view.requests.filter(item => item.url === '/api/file-manager/v2/control' && JSON.parse(item.init.body).op === 'text.read').length >= 2, 'save receipt verification also requires the working control snapshot route');
@@ -116,10 +117,10 @@ test('editing and saving through the text route preserves UTF-8 BOM and CRLF', a
   const view = await setup(t, { seed: root => writeFile(path.join(root, 'folder/hello.txt'), '\ufeff第一行\r\n第二行\r\n') });
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: '已修改\n第二行\n' } }));
+  editorEdit(view, '已修改\n第二行\n');
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '\ufeff已修改\r\n第二行\r\n');
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, '已修改\n第二行\n');
+  assert.equal(editorProps(view.renderer)?.value, '已修改\n第二行\n');
   assert.equal(node(view.renderer, { 'data-fm-document-state': 'clean' }).children.length > 0, true);
   const request = view.requests.find(item => item.url === '/api/file-manager/v2/text' && item.init.method === 'POST' && JSON.parse(item.init.body).op === 'save');
   const payload = JSON.parse(request.init.body);
@@ -132,10 +133,10 @@ test('an unsaved draft survives unmounting and remounting the standalone main pa
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: '面板切换保留' } }));
+  editorEdit(view, '面板切换保留');
   view.unmount();
   await view.mount();
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, '面板切换保留');
+  assert.equal(editorProps(view.renderer)?.value, '面板切换保留');
   assert.equal(node(view.renderer, { 'data-fm-document-state': 'dirty' }).children.length > 0, true);
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '<script>not executable</script>\n你好');
 });
@@ -144,10 +145,10 @@ test('a save conflict exposes disk and local text without overwriting either', a
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: '本地草稿' } }));
+  editorEdit(view, '本地草稿');
   await writeFile(path.join(view.root, 'folder/hello.txt'), '外部写入');
   await view.click({ 'data-fm-action': 'save' });
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, '本地草稿');
+  assert.equal(editorProps(view.renderer)?.value, '本地草稿');
   assert.equal(textOf(node(view.renderer, { 'data-fm-conflict': 'disk' })), '外部写入');
   assert.equal(textOf(node(view.renderer, { 'data-fm-conflict': 'draft' })), '本地草稿');
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '外部写入');
@@ -161,10 +162,10 @@ test('manual refresh flags external changes without replacing a dirty editor', a
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'keep draft' } }));
+  editorEdit(view, 'keep draft');
   await writeFile(path.join(view.root, 'folder/hello.txt'), 'external');
   await view.click({ 'data-fm-action': 'refresh' });
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'keep draft');
+  assert.equal(editorProps(view.renderer)?.value, 'keep draft');
   assert.equal(nodes(view.renderer, { 'data-fm-external-change': true }).length, 1);
 });
 
@@ -172,14 +173,14 @@ test('closing a dirty editor supports cancel and explicit discard without a disk
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'do not lose silently' } }));
+  editorEdit(view, 'do not lose silently');
   await view.click({ 'data-fm-action': 'close-document' });
   assert.equal(view.renderer.root.findAllByType(uiBoundary.Modal).some(modal => modal.props.open), true);
   await view.click({ 'data-fm-action': 'close-cancel' });
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'do not lose silently');
+  assert.equal(editorProps(view.renderer)?.value, 'do not lose silently');
   await view.click({ 'data-fm-action': 'close-document' });
   await view.click({ 'data-fm-action': 'close-discard' });
-  assert.equal(nodes(view.renderer, { 'data-fm-editor': true }).length, 0);
+  assert.equal(editorCount(view.renderer), 0);
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '<script>not executable</script>\n你好');
 });
 
@@ -187,10 +188,10 @@ test('saving from the close prompt closes only after the exact snapshot is verif
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'save before close' } }));
+  editorEdit(view, 'save before close');
   await view.click({ 'data-fm-action': 'close-document' });
   await view.click({ 'data-fm-action': 'close-save' });
-  assert.equal(nodes(view.renderer, { 'data-fm-editor': true }).length, 0);
+  assert.equal(editorCount(view.renderer), 0);
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'save before close');
 });
 
@@ -206,14 +207,14 @@ test('typing while a save is in flight remains dirty after its receipt arrives',
   } });
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'submitted' } }));
+  editorEdit(view, 'submitted');
   let save;
   await act(async () => { save = node(view.renderer, { 'data-fm-action': 'save' }).props.onClick(); await saving; });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'newer typing' } }));
+  editorEdit(view, 'newer typing');
   await act(async () => { release(); await save; });
   await view.flush();
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'submitted');
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'newer typing');
+  assert.equal(editorProps(view.renderer)?.value, 'newer typing');
   assert.equal(nodes(view.renderer, { 'data-fm-document-state': 'dirty' }).length, 1);
 });
 
@@ -232,7 +233,7 @@ test('a Host without the write capability cannot expose active mutation controls
   assert.ok(edit.length === 0 || edit[0].props.disabled);
   assert.equal(view.requests.some(item => item.init.method === 'POST' && item.url === '/api/file-manager/v2/text'), false);
   assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/v2/text')), false, 'old read-only Hosts have only the control route');
-  assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '<script>not executable</script>\n你好');
+  assert.equal(editorProps(view.renderer)?.value, '<script>not executable</script>\n你好');
 });
 
 test('new file creation publishes an empty file in the browsed directory', async t => {
@@ -243,7 +244,7 @@ test('new file creation publishes an empty file in the browsed directory', async
   await view.click({ 'data-fm-action': 'name-submit' });
   assert.equal(await readFile(path.join(view.root, 'folder/新文件.txt'), 'utf8'), '');
   assert.equal(nodes(view.renderer, { 'data-fm-path': 'folder/新文件.txt' }).length, 1);
-  assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '');
+  assert.equal(editorProps(view.renderer)?.value, '');
 });
 
 test('new directory creation refuses to replace an existing name', async t => {
@@ -262,14 +263,14 @@ test('renaming a selected edited file relocates its unsaved draft', async t => {
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: '草稿跟随重命名' } }));
+  editorEdit(view, '草稿跟随重命名');
   await view.click({ 'data-fm-action': 'rename' });
   assert.ok(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'entries.stat' && JSON.parse(item.init.body).path === 'folder/hello.txt'), 'rename confirmation must capture a strong source version');
   act(() => node(view.renderer, { 'data-fm-name': true }).props.onChange({ target: { value: '改名.txt' } }));
   await view.click({ 'data-fm-action': 'name-submit' });
   await assert.rejects(access(path.join(view.root, 'folder/hello.txt')), { code: 'ENOENT' });
   assert.equal(await readFile(path.join(view.root, 'folder/改名.txt'), 'utf8'), '<script>not executable</script>\n你好');
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, '草稿跟随重命名');
+  assert.equal(editorProps(view.renderer)?.value, '草稿跟随重命名');
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'folder/改名.txt'), 'utf8'), '草稿跟随重命名');
 });
@@ -293,13 +294,13 @@ test('removing a root entry opens an explicit non-deleting confirmation and canc
 test('confirmed root removal revokes only its entry and preserves disk files and the dirty draft', async t => {
   const view = await setup(t);
   await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'retained after grant removal' } }));
+  editorEdit(view, 'retained after grant removal');
   const rootId = view.manager.listRoots()[0].id;
   await view.click({ title: '只移除这个入口，不删除磁盘文件' });
   await view.click({ 'data-fm-action': 'remove-root-confirm' });
   assert.equal(view.manager.listRoots().length, 0);
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '<script>not executable</script>\n你好');
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'retained after grant removal');
+  assert.equal(editorProps(view.renderer)?.value, 'retained after grant removal');
   assert.equal(nodes(view.renderer, { 'data-fm-missing': true }).length, 1);
   const removals = view.requests.filter(item => item.init.body && JSON.parse(item.init.body).op === 'roots.remove');
   assert.equal(removals.length, 1);
@@ -434,10 +435,10 @@ test('an externally deleted file remains an invalid draft and cannot be recreate
   const view = await setup(t);
   await view.openHello();
   await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'retain after deletion' } }));
+  editorEdit(view, 'retain after deletion');
   await rm(path.join(view.root, 'folder/hello.txt'));
   await view.click({ 'data-fm-action': 'refresh' });
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'retain after deletion');
+  assert.equal(editorProps(view.renderer)?.value, 'retain after deletion');
   assert.equal(node(view.renderer, { 'data-fm-action': 'save' }).props.disabled, true);
   await view.click({ 'data-fm-action': 'save' });
   await assert.rejects(access(path.join(view.root, 'folder/hello.txt')), { code: 'ENOENT' });
@@ -495,14 +496,14 @@ test('directory paste offers skip or rename but never an implicit overwrite merg
 test('a cut task relocates the file while retaining and relocating its unsaved draft', async t => {
   const view = await setup(t, { tasks: true });
   await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'draft travels with the file' } }));
+  editorEdit(view, 'draft travels with the file');
   await view.click({ 'data-fm-action': 'cut' });
   await view.click({ 'data-fm-root': true });
   await view.click({ 'data-fm-action': 'paste' }); await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list(); await view.waitForTask(task.id);
   await view.click({ 'data-fm-action': 'refresh-tasks' });
   await assert.rejects(access(path.join(view.root, 'folder/hello.txt')), { code: 'ENOENT' });
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'draft travels with the file');
+  assert.equal(editorProps(view.renderer)?.value, 'draft travels with the file');
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'hello.txt'), 'utf8'), 'draft travels with the file');
 });
@@ -733,7 +734,7 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
     return response;
   } });
   await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
-  act(() => node(view.renderer, { 'data-fm-editor': true }).props.onChange({ target: { value: 'dirty stays' } }));
+  editorEdit(view, 'dirty stays');
   assert.ok(streams.length > 0, 'the panel never subscribed to Host events');
   await writeFile(path.join(view.root, 'folder/hello.txt'), 'external event');
   changed = true;
@@ -742,7 +743,7 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
     await reread;
   });
   await view.flush();
-  assert.equal(node(view.renderer, { 'data-fm-editor': true }).props.value, 'dirty stays');
+  assert.equal(editorProps(view.renderer)?.value, 'dirty stays');
   assert.equal(nodes(view.renderer, { 'data-fm-external-change': true }).length, 1);
   const last = streams.at(-1);
   view.unmount();
@@ -799,7 +800,7 @@ test('an oversized event frame fails rather than growing memory without a bound'
 test('opening a file displays literal text without executing HTML or sending a prompt', async t => {
   const view = await setup(t);
   await view.openHello();
-  assert.equal(textOf(node(view.renderer, { 'data-fm-preview': 'text' })), '<script>not executable</script>\n你好');
+  assert.equal(editorProps(view.renderer)?.value, '<script>not executable</script>\n你好');
   assert.equal(view.renderer.root.findAllByType('script').length, 0);
 });
 
@@ -970,4 +971,170 @@ test('the panel ships its own stylesheet instead of rendering an empty style ele
   assert.ok(css.includes('.dsh-fm .fm-layout'), 'the stylesheet must define the panel grid');
   assert.ok(css.includes('.dsh-fm-dialog'), 'dialog styling must travel with the panel');
   assert.ok(css.length > 1000, `an empty or truncated stylesheet breaks the layout (got ${css.length} characters)`);
+});
+
+/* ------------------------------------------------------------------ *
+ * Code editor integration: the first RED batch.
+ *
+ * Every case fails on the business rule it names — never on a missing export,
+ * never inside a helper — so the integration signal cannot be masked by a
+ * build-level error.
+ *
+ * Subject: the panel→component boundary. Under React's test renderer no host ref
+ * is ever attached, so CodeMirror is not constructed and the component runs its
+ * documented no-view lifecycle: the React container and its `data-fm-code*` marks
+ * render, the failure fallback stays unreachable. Editor internals — the real
+ * `.cm-content`, its colour spans and actual typing — belong to the independent
+ * jsdom suite; asserting them here would be false green.
+ * ------------------------------------------------------------------ */
+
+/** The open document's metadata footer, told apart from the panel footer. */
+const documentFooter = view => view.renderer.root.findAll(item => item.type === 'footer')
+  .find(item => item.findAll(candidate => 'data-fm-document-state' in candidate.props).length > 0);
+/** The `data-fm-code*` marks the editor container declares. */
+const codeMarks = view => editorContainers(view.renderer)[0]?.props;
+/**
+ * The visible status note nodes. The frozen contract renders them only while the
+ * highlight state is not `active`, so `active` must have none and `plain`/
+ * `limited`/`error` must have exactly one whose own `data-fm-code-note` mirrors
+ * the container's `data-fm-code-highlight`.
+ */
+const noteNodes = view => view.renderer.root.findAll(item => typeof item.type === 'string' && item.props.className === 'fm-code-note');
+/**
+ * The constant language label. It exists only when there is a language name to
+ * show, so a plain-text file has none: in that state the reason note already
+ * carries the whole message, and a second node could only repeat it.
+ */
+const codeLabels = view => view.renderer.root.findAll(item => typeof item.type === 'string' && item.props.className === 'fm-code-language');
+
+test('an opened file renders exactly one code editor declared as preview', async t => {
+  const view = await setup(t);
+  await view.openHello();
+  assert.equal(editorCount(view.renderer), 1, 'an opened file must render exactly one code editor');
+  assert.equal(codeMarks(view)?.['data-fm-code-mode'], 'preview', 'a file opens in preview mode');
+});
+
+test('the editor renders the LF-normalized draft while the footer keeps the disk metadata', async t => {
+  const view = await setup(t, { seed: root => writeFile(path.join(root, 'folder/hello.txt'), '第一行\r\n第二行\r\n') });
+  await view.openHello();
+  assert.equal(editorProps(view.renderer)?.value, '第一行\n第二行\n', 'the editor must render the LF-normalized draft the document store owns');
+  await view.click({ 'data-fm-action': 'edit' });
+  assert.equal(editorProps(view.renderer)?.value, '第一行\n第二行\n', 'entering edit mode must not rewrite the text');
+  assert.equal(codeMarks(view)?.['data-fm-code-mode'], 'edit', 'edit mode must be declared on the editor container');
+  assert.match(textOf(documentFooter(view)), /CRLF/, 'the metadata footer must keep reporting the disk line ending');
+});
+
+test('a Host that cannot write renders a non-writable editor', async t => {
+  const view = await setup(t, { intercept: async (url, init, route) => {
+    const response = await route(url, init);
+    if (init.body && JSON.parse(init.body).op === 'bootstrap') {
+      const envelope = await response.json();
+      envelope.value.capabilities.write = false;
+      return new Response(JSON.stringify(envelope));
+    }
+    return response;
+  } });
+  await view.openHello();
+  assert.equal(editorProps(view.renderer)?.canWrite, false, 'a read-only Host must render a non-writable editor');
+});
+
+test('a degraded Host stays read-only even when it still advertises write', async t => {
+  const view = await setup(t, { intercept: async (url, init, route) => {
+    const response = await route(url, init);
+    if (init.body && JSON.parse(init.body).op === 'bootstrap') {
+      const envelope = await response.json();
+      envelope.value.degraded = { scope: 'operations', code: 'INITIALIZATION_FAILED', message: 'The operation journal could not be opened.', readOnly: true };
+      return new Response(JSON.stringify(envelope));
+    }
+    return response;
+  } });
+  await view.openHello();
+  assert.equal(editorProps(view.renderer)?.canWrite, false, 'a degraded Host must not render a writable editor');
+  const edit = nodes(view.renderer, { 'data-fm-action': 'edit' });
+  assert.ok(edit.length === 0 || edit[0].props.disabled === true, 'a degraded Host must not offer its edit entry point');
+  assert.equal(view.requests.some(item => item.url === '/api/file-manager/v2/text'), false, 'a degraded Host must not receive a text write');
+});
+
+test('the editor save callback writes the current draft to disk', async t => {
+  const view = await setup(t);
+  await view.openHello();
+  await view.click({ 'data-fm-action': 'edit' });
+  assert.ok(editorProps(view.renderer), 'an opened file must render the code editor before its callback is exercised');
+  editorEdit(view, 'saved from the editor callback');
+  const onSave = editorProps(view.renderer).onSave;
+  assert.equal(typeof onSave, 'function', 'the editor must receive the panel save callback');
+  await act(async () => { onSave(); await view.settle(); });
+  assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'saved from the editor callback');
+});
+
+test('a missing DOM never revives a native text control or the failure fallback', async t => {
+  const view = await setup(t);
+  await view.openHello();
+  await view.click({ 'data-fm-action': 'edit' });
+  assert.equal(view.renderer.root.findAll(item => item.type === 'textarea').length, 0, 'the legacy textarea editor must not come back');
+  assert.equal(nodes(view.renderer, { 'data-fm-code-fallback': 'edit' }).length, 0, 'a missing DOM must not be reported as an editor failure');
+  assert.notEqual(codeMarks(view)?.['data-fm-code-highlight'], 'error', 'a missing DOM must not degrade the highlight state to error');
+});
+
+test('an unmapped suffix declares the plaintext language and a plain highlight note', async t => {
+  const { zh } = await loadClientModule('i18n');
+  const view = await setup(t);
+  await view.openHello();
+  assert.equal(codeMarks(view)?.['data-fm-code-language'], 'plaintext', 'a suffix the Host does not map must declare the plaintext language');
+  assert.equal(codeMarks(view)?.['data-fm-code-highlight'], 'plain', 'plain text is not an error state');
+  assert.equal(codeLabels(view).length, 0, 'a plain-text file has no language name, so it must not render a language label');
+  const notes = noteNodes(view);
+  assert.equal(notes.length, 1, 'a non-active highlight must be explained by exactly one visible note');
+  assert.equal(notes[0].props['data-fm-code-note'], 'plain', 'the note must mirror the highlight state it explains');
+  assert.equal(textOf(notes[0]), zh['code.language.plaintext'], 'the note must resolve to the shipped message, not the raw key');
+});
+
+test('a Host-mapped suffix declares the active highlight without a note node', async t => {
+  const view = await setup(t, { seed: root => writeFile(path.join(root, 'hello.ts'), 'const answer = 42;\n') });
+  await view.click({ 'data-fm-entry': 'file', 'data-fm-path': 'hello.ts' });
+  assert.equal(editorProps(view.renderer)?.languageHint, 'typescript', 'the panel must pass the Host grammar hint through unchanged');
+  assert.equal(codeMarks(view)?.['data-fm-code-language'], 'typescript', 'the container must declare the resolved grammar');
+  assert.equal(codeMarks(view)?.['data-fm-code-highlight'], 'active', 'a supported grammar must not sit in a degraded highlight state');
+  assert.equal(noteNodes(view).length, 0, 'an active highlight must not render a status note');
+});
+
+test('the language label resolves the language name into the shipped message', async t => {
+  const view = await setup(t, { seed: root => writeFile(path.join(root, 'hello.ts'), 'const answer = 42;\n') });
+  await view.click({ 'data-fm-entry': 'file', 'data-fm-path': 'hello.ts' });
+  const labels = codeLabels(view);
+  assert.equal(labels.length, 1, 'a recognized language must render exactly one language label');
+  const label = textOf(labels[0]);
+  assert.notEqual(label, 'code.language', 'the label must resolve to the shipped message, not the raw key');
+  assert.equal(label.includes('{language}'), false, 'the label must be formatted with the language name');
+});
+
+/* ------------------------------------------------------------------ *
+ * R21 layout contract. Stretching .cm-editor alone is not enough: CodeMirror
+ * mounts into an unmarked .fm-code-mount child, so a missing flex/min-height
+ * there lets the panel clip the editor instead of scrolling it. These cases read
+ * the declarations the shipped stylesheet actually carries.
+ * ------------------------------------------------------------------ */
+
+/** The declaration block of one exact selector in the shipped stylesheet. */
+const declarationBlock = (css, selector) =>
+  new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\{([^}]*)\\}`).exec(css)?.[1] ?? '';
+
+const shippedCss = view => textOf(view.renderer.root.findAll(candidate => candidate.type === 'style')[0]);
+
+test('the shipped stylesheet carries the editor fill chain down to the mount', async t => {
+  const view = await setup(t);
+  const css = shippedCss(view);
+  const mount = declarationBlock(css, '.dsh-fm [data-fm-code] .fm-code-mount');
+  assert.match(mount, /display:flex/, 'the mount must lay out its editor child');
+  assert.match(mount, /flex:1/, 'the mount must take the space the status rows leave');
+  assert.match(mount, /min-height:0/, 'the mount must be allowed to shrink below its content');
+  assert.match(mount, /min-width:0/, 'the mount must not force the preview column wider');
+  assert.match(mount, /overflow:hidden/, 'the mount must not overflow the panel column');
+  assert.match(declarationBlock(css, '.dsh-fm [data-fm-code] .cm-editor'), /flex:1/, 'the editor must fill the mount');
+});
+
+test('the shipped stylesheet aligns the editor status rows with the code padding', async t => {
+  const view = await setup(t);
+  const rows = declarationBlock(shippedCss(view), '.dsh-fm .fm-code-language,.dsh-fm .fm-code-note');
+  assert.match(rows, /padding:6px 16px 0/, 'the status rows must line up with the 16px code padding');
 });

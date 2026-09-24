@@ -4,7 +4,7 @@
 
 ## 当前版本与验证状态
 
-当前本地适配版为 **0.2.9-rc.1**，面向 DSH **0.1.7-rc.1**；已通过类型检查、构建、531 项回归及 tarball 校验，没有发布到公共 registry。包含原生 Config 初始化修复、引用预览列表 key 修复及干净克隆下的打包目录初始化。下方保留旧版本验证记录。
+当前适配版为 **0.3.0**，面向 DSH **0.1.7-rc.1**。本代次新增 Client 内联编辑器与首批语言语法高亮（SPEC 的 R21）：编辑器与文法随 `dist/client.js` 打包，运行时不依赖宿主提供编辑器。**发布与安装状态不在仓库内声明**——本仓库不记录 registry 发布结果，也不记录安装到某个 DSH 实例的结果，公开状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager) 为准。开发期验证记录：类型检查、构建与 **634 项回归（0 失败 0 跳过；基线 531 新增 103）**，另含发布 workflow 门禁回归；UI 的真实键盘/输入法、像素滚动与主题 computed 颜色仍未验收。下方保留旧版本验证记录。
 
 - GitHub 基线版本：**0.2.8**（TypeScript 结构性重构代次）。本代次在**独立副本** `dsh-file-manager-ts/` 中进行：原始项目 `dsh-file-manager/` 全程只读，不在其中运行测试、构建或修改文件。0.2.8 发布前已重新通过 `npm run check`（类型检查、构建与产物语法检查）、`npm run build:native` 与全量 **518 项测试（0 失败、0 跳过）**；公开发布状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager/v/0.2.8) 为准。
 - 重构前的副本基线（改动前实测）：`npm test` **329/329 通过、0 跳过**，`npm run check` 与 `npm run build:native` 通过。该基线是本次重构的等价性红线。
@@ -153,6 +153,7 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
   4. 选择一个已有草稿/引用的会话，确认引用只追加到该会话且不发送。
   5. 明暗主题、键盘操作、重启后根登记和中断任务状态。
   6. 1620×900 / 1000px / 600px 三档宽度下的路径栏表现与键盘滚动查看完整层级。
+  7. 语法高亮（R21）：真实物理键盘与输入法组合、autoclose 等只在真实输入事件上触发的输入处理器、几何布局与像素滚动、宿主主题解析后的 computed 颜色（明暗两套），以及 macOS 上的 Cmd+S 物理按键。
 
 ## 已知限制
 
@@ -163,6 +164,7 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 - 含双引号或控制字符的路径不能安全表示为当前会话引用语法，引用操作会明确拒绝。
 - 尚未执行真实 2 GiB 文件和 10,000 条目全链路压力测试；现有测试验证配置限制和流式边界，不宣称压力性能。
 - 复制/移动路径的内部读取放大在 N× 量级：同一份字节会在规划期强校验、复制流、目标校验、删源前重证里各读一次，16 MiB 文件实测 `rchar` 增量约为文件大小的 10 倍，尚未做 2 GiB 实测。这是已知的实现特性，**不是校验被裁剪**——核验预算按操作清单的文件字节总量一次性扣减，逐次读取仍有硬上限，`sha256` 仍逐字节核验。后续若优化，只允许复用已算出的摘要或合并同一字节的重复全量哈希，不得以减少校验次数换取吞吐。
+- 语法高亮的自动化只断言着色引用的是宿主 token 变量（`--shiki-token-*`/`--dsw-*`），不断言主题解析后的 computed 颜色；真实输入法、物理按键与像素滚动未自动化（边界见 SPEC 的 R21.11）。
 
 ## 开发与复核记录
 
@@ -171,6 +173,8 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 - 原生竞争、真实 `/tmp` → `/dev/shm` EXDEV、目标消失/同尺寸修改/父容器替换、持久化失败与关闭竞争均有回归。
 - 测试仅使用独立临时目录并清理，没有在用户真实目录中做破坏性实验。
 - TDD 技能引用的测试附录未随环境提供，已执行主文的 Red–Green–Refactor、真实行为断言和全套回归。
+- 语法高亮（R21）在**构建产物**上做独立 jsdom 真实 DOM 验收（`tests/editor-dom.test.mjs` 与共享 `tests/editor-dom-harness.mjs`，53 项）：着色只统计实际渲染 span 用到的类所映射出的颜色值；首批 11 种语言加 JSX/TSX 共 13 组样本在预览与编辑两种模式下都断言原文逐字不变且 ≥2 个不同 token 颜色；预算、降级、只读、程序性回流、跨文档隔离与卸载释放同样按真实 DOM 断言。该过程中发现并修复：`editor` 命名空间缺预算 re-export、CodeMirror 内 Ctrl/Cmd+S 为空桩、`limited` 只改状态未撤文法、失败态与视图生命周期、卸载/换文档后陈旧视图仍送达快捷键、降级只读面的 `onChange` 未按 `canWrite` 门控、编辑面缺 `tabindex="0"`。
+- 捆绑第三方代码的许可原文见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，其回归用例从构建产物实际内联的包反查声明完整性。
 
 ## 发布流程
 
@@ -183,7 +187,9 @@ npm 包名已从 `@local/dsh-file-manager` 改为 **`@lolkda/dsh-file-manager`**
 
 `npm publish` 会先执行 `prepublishOnly`（`check` + `build:native` + `test`），所以未经校验的构建无法到达 registry。`publishConfig` 把发布目标固定为 `https://registry.npmjs.org/`，避免本机指向镜像源时误发。
 
-发布步骤在**未配置 `NPM_TOKEN` 时自动跳过**并输出 notice，不会让工作流变红；`workflow_dispatch` 在分支上只做校验、不发布。首次发布前需在仓库 Secrets 中配置具有 `publish` 权限的 npm token。
+发布身份来自 **npm 可信发布（Trusted Publishing / OIDC）**：`publish` 作业在 GitHub-hosted runner 上只申请 `contents: read` 与 `id-token: write`，用该作业的 OIDC 身份换取短期发布令牌，**不读取、也不需要任何存储凭据**；缺少发布身份时作业直接失败，不会静默跳过。可信发布要求 npm ≥ 11.5.1 与 Node ≥ 22.14，因此发布前显式安装 `npm@11.19.0`（不假设 runner 自带版本够新）。仓库与包均为公开时 provenance 自动生成，无需额外传 `--provenance`。`workflow_dispatch` 在分支上只做校验、不发布；发布只在匹配版本的 tag 上发生。
+
+首次发布前需在 npm 侧为该仓库配置 Trusted Publisher：owner `lolkda`、repo `dsh-file-manager`、workflow 文件名 `release.yml`、Environment 留空、Allowed actions 包含 `npm publish`。仓库 Secrets 中不再需要 npm token。
 
 发布 `@lolkda/dsh-file-manager` 的步骤：
 
@@ -199,3 +205,7 @@ git tag v0.2.8 && git push origin v0.2.8
 ## License
 
 UNLICENSED —— 保留全部权利。包会发布到 npmjs.com 公开 registry，但未授予他人使用、修改或再分发的许可。
+
+### 捆绑第三方代码的许可
+
+`dist/client.js` 内联的编辑器依赖（27 个 MIT 包）各自的完整许可原文见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)；该文件随包发布，本项目自身仍是 UNLICENSED。回归用例 `tests/package-notices.test.mjs` 从构建产物实际内联的包反查声明是否完整。

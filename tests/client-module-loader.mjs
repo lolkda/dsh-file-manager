@@ -56,6 +56,35 @@ export const uiBoundary = {
         h('button', { onClick: onConfirm, disabled: disabled || !acknowledged }, confirmLabel)) },
     h(uiBoundary.Checkbox, { checked: acknowledged, onChange: onAcknowledgedChange, disabled, label: acknowledgeLabel }));
   },
+  /**
+   * Host-public filename→grammar selection, standing in for the primitive
+   * package's own `languageForPath` export at the module-table boundary.
+   *
+   * The Client calls `ui.languageForPath?.(path)` and must resolve to plain text
+   * when a Host does not provide the function, so this adapter answers exactly
+   * like the Host for the suffixes it answers at all — it is a boundary stub,
+   * never a production fallback and never a second implementation of the Host's
+   * full map. A suite that needs another suffix must extend the table below from
+   * the Host's public map rather than guess.
+   */
+  languageForPath(path) {
+    const extension = /\.([^./]+)$/u.exec(String(path).replaceAll('\\', '/'))?.[1]?.toLowerCase();
+    return extension === undefined ? undefined : HOST_LANGUAGE_SUFFIXES[extension];
+  },
+};
+
+/**
+ * Subset of the installed Host's public suffix→grammar map, transcribed for the
+ * suffixes these suites exercise (see `languageForPath` above). The Host owns the
+ * full map; this table only has to agree with it where it answers.
+ */
+const HOST_LANGUAGE_SUFFIXES = {
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  json: 'json', jsonc: 'json',
+  md: 'markdown', markdown: 'markdown',
+  py: 'python', sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript',
+  css: 'css', html: 'html', htm: 'html', yml: 'yaml', yaml: 'yaml',
 };
 
 /** The modules the browser module table provides; React must never be bundled twice. */
