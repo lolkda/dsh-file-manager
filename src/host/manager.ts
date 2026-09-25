@@ -563,36 +563,22 @@ export function createManager(options: ManagerOptions = {}) {
     for (const ref of selected) if (!unique.some(parent => ref.absolute === parent.absolute || ref.absolute.startsWith(`${parent.absolute}/`))) unique.push(ref);
     const targets = unique.map(({ rootId, path: relativePath }) => ({ rootId, path: relativePath }));
     const entries: DeletePlanEntry[] = [];
-    // One budget for the whole manifest: a plan that would verify more bytes
-    // than the profile allows is refused instead of verified more cheaply.
-    const spend = createVerificationBudget(maxVerificationBytes);
-    // Metadata-only measurement first, so an over-budget plan is refused before
-    // a single byte of file content is read.
-    let plannedBytes = 0;
-    async function measure(ref: { rootId: string; path: string }): Promise<void> {
-      if (signal?.aborted) fail('CANCELLED', 'Deletion preparation was cancelled.', 499);
-      const entry = await io.stat({ ...ref, signal, metadataOnly: true });
-      if (!['file', 'directory', 'symlink'].includes(entry.kind)) fail('UNSUPPORTED_ENTRY', 'A selected tree contains an unsupported entry.', 422);
-      if (entry.kind === 'file') plannedBytes += entry.size;
-      if (entry.kind !== 'directory') return;
-      const directory = await openDirectory(rootOf(ref.rootId), partsOf(ref.path));
-      let children: string[];
-      try { children = (await fs.readdir(fdPath(directory))).sort(); }
-      finally { await directory.close(); }
-      for (const child of children) {
-        const childPath = `${ref.path}/${child}`;
-        if (pathViolation(childPath, false) !== undefined) {
-          fail('UNREPRESENTABLE_REFERENCE', 'This entry name cannot be represented safely by the current path grammar; it cannot be deleted or included in an operation.', 422);
-        }
-        await measure({ rootId: ref.rootId, path: childPath });
-      }
-    }
-    for (const ref of targets) await measure(ref);
-    chargeVerification(spend, plannedBytes);
+    // The manifest bound counts entries as they enter the walk, not as they are
+    // stored: the manifest is postorder, so a directory is pushed only after its
+    // whole subtree and would otherwise never be counted while it is walked. The
+    // same counter bounds a wide tree and a deep chain alike, and the visited
+    // entry is checked before it is inspected.
+    let visited = 0;
+    // One metadata pass builds the whole postorder manifest. Permanent deletion
+    // never reads file content and never charges the content-verification budget:
+    // a prepared entry binds a metadata snapshot (`dev:ino:size:mtimeNs:ctimeNs`)
+    // plus the membership of each directory, and every entry is re-checked as it
+    // is removed.
     async function collect(ref: { rootId: string; path: string }): Promise<void> {
       if (signal?.aborted) fail('CANCELLED', 'Deletion preparation was cancelled.', 499);
-      if (entries.length >= DELETE_PLAN_MAX_ENTRIES) fail('TOO_LARGE', `The deletion manifest exceeds ${DELETE_PLAN_MAX_ENTRIES} entries.`, 413);
-      const entry: DeletePlanEntry = await io.stat({ ...ref, signal, budget: spend });
+      visited += 1;
+      if (visited > DELETE_PLAN_MAX_ENTRIES) fail('TOO_LARGE', `The deletion manifest exceeds ${DELETE_PLAN_MAX_ENTRIES} entries.`, 413);
+      const entry: DeletePlanEntry = await io.stat({ ...ref, signal, metadataOnly: true });
       if (!['file', 'directory', 'symlink'].includes(entry.kind)) fail('UNSUPPORTED_ENTRY', 'A selected tree contains an unsupported entry.', 422);
       if (entry.kind === 'directory') {
         const directory = await openDirectory(rootOf(ref.rootId), partsOf(ref.path));
@@ -609,10 +595,12 @@ export function createManager(options: ManagerOptions = {}) {
         entry.children = children;
         if ((await statEntry(ref)).version !== entry.version) fail('VERSION_CONFLICT', 'The directory changed during deletion preparation.', 409);
       }
-      if (entries.length >= DELETE_PLAN_MAX_ENTRIES) fail('TOO_LARGE', `The deletion manifest exceeds ${DELETE_PLAN_MAX_ENTRIES} entries.`, 413);
       entries.push(entry);
     }
     for (const ref of targets) await collect(ref);
+    // Last checkpoint before the manifest becomes usable: a cancellation that
+    // arrived while the tree was walked must not publish a plan.
+    if (signal?.aborted) fail('CANCELLED', 'Deletion preparation was cancelled.', 499);
     const id = randomUUID();
     const expiresAt = now() + deletePlanTtlMs;
     deletePlans.set(id, { id, targets, entries, expiresAt, promise: null, result: null });
@@ -631,11 +619,16 @@ export function createManager(options: ManagerOptions = {}) {
     if (now() > plan.expiresAt) return Promise.reject(new FileManagerError('PLAN_EXPIRED', 'The deletion confirmation expired. Prepare it again.', 409));
     plan.promise = mutate<DeleteCommitResult>(async () => {
       if (now() > plan.expiresAt) fail('PLAN_EXPIRED', 'The deletion confirmation expired while waiting.', 409);
+      // Whole-manifest precheck: every entry, whatever its type, must still carry
+      // the prepared metadata snapshot, and every prepared directory must still
+      // have exactly the members it was prepared with.
       for (const entry of plan.entries) {
         let current: EntryView;
-        try { current = await io.stat({ ...entry, budget: createVerificationBudget(maxVerificationBytes) }); }
+        try { current = await io.stat({ ...entry, metadataOnly: true }); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail('VERSION_CONFLICT', 'A prepared deletion target no longer exists.', 409); throw error; }
-        if (current.version !== entry.version) fail('VERSION_CONFLICT', 'A prepared deletion target changed. Review a fresh confirmation.', 409);
+        if (current.kind !== entry.kind || current.version !== entry.version) {
+          fail('VERSION_CONFLICT', 'A prepared deletion target changed. Review a fresh confirmation.', 409);
+        }
         if (entry.kind === 'directory') {
           const directory = await openDirectory(rootOf(entry.rootId), partsOf(entry.path));
           try {
@@ -650,9 +643,15 @@ export function createManager(options: ManagerOptions = {}) {
         try {
           await withParent(entry, async location => {
             const current = await fs.lstat(location.address, { bigint: true });
-            const matches = entry.kind === 'directory' ? identity(current) === entry.identity && current.isDirectory()
-              : entry.kind === 'file' ? current.isFile() && (await io.stat({ ...entry, budget: createVerificationBudget(maxVerificationBytes) })).version === entry.version
-                : stamp(current) === entry.version;
+            // Files and links are bound to their full metadata stamp plus their
+            // explicit kind. A directory's own stamp moves while this operation
+            // removes its children, so the final rmdir is bound to the prepared
+            // identity and stays non-recursive: it can only succeed while the
+            // directory is still empty, so a member added meanwhile is never
+            // removed with it.
+            const matches = entry.kind === 'directory'
+              ? identity(current) === entry.identity && current.isDirectory()
+              : kindOf(current) === entry.kind && stamp(current) === entry.version;
             if (!matches) fail('VERSION_CONFLICT', 'The target changed during deletion.', 409);
             await verifyParent(location);
             if (entry.kind === 'directory') await fs.rmdir(location.address);

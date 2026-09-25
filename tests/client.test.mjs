@@ -570,9 +570,17 @@ test('upload overwrite checks the reviewed target version before publishing', as
   const view = await setup(t, { transfers: true, seed: root => writeFile(path.join(root, 'upload.txt'), 'original') });
   await act(async () => { await node(view.renderer, { 'data-fm-upload-files': true }).props.onChange({ target: { files: [new File(['incoming'], 'upload.txt')], value: '' } }); });
   await view.flush();
-  act(() => node(view.renderer, { 'data-fm-upload-policy': 0 }).props.onChange({ target: { value: 'overwrite' } }));
+  // The review control is the shared themed Menu (tests/upload-ui.test.mjs owns
+  // its UI contract); this case keeps the policy's own guarantee: the version
+  // the user reviewed is the one the begin request binds.
+  const reviewed = (await view.manager.io.stat({ rootId: view.manager.listRoots()[0].id, path: 'upload.txt' })).version;
+  assert.equal(node(view.renderer, { 'data-fm-upload-policy': 0 }).type, 'button', 'the upload policy control is the shared themed menu trigger');
+  await view.click({ 'data-fm-upload-policy': 0 });
+  await view.click({ role: 'menuitem', 'data-menu-item': 'overwrite' });
   await writeFile(path.join(view.root, 'upload.txt'), 'replacement');
   await view.click({ 'data-fm-action': 'upload-confirm' });
+  const begun = view.requests.find(item => item.init.body && JSON.parse(item.init.body).op === 'transfers.begin');
+  assert.equal(JSON.parse(begun.init.body).items[0].expectedVersion, reviewed, 'an overwrite upload must carry the version the review bound');
   assert.equal(await readFile(path.join(view.root, 'upload.txt'), 'utf8'), 'replacement');
   assert.equal(view.transfers.list()[0].status, 'failed');
 });

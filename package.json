@@ -1,6 +1,6 @@
 {
   "name": "@lolkda/dsh-file-manager",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Independent DSH file manager with explicit Host-local root grants",
   "keywords": [
     "dsh",

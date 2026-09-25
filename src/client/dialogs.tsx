@@ -94,6 +94,16 @@ export function dialogButton({ t, ui }: Pick<DialogContext, 't' | 'ui'>, label: 
   return <ui.Button variant="ghost" size="sm" type="button" {...props}>{t(label)}</ui.Button>;
 }
 
+/**
+ * The upload review's footer action: the standard control size, this dialog only.
+ *
+ * Sizing belongs to the caller instead of `dialogButton`, so the small default
+ * every other dialog uses stays untouched.
+ */
+function uploadAction({ t, ui }: Pick<DialogContext, 't' | 'ui'>, label: string, props: PrimitiveProps = {}): ReactNode {
+  return <ui.Button variant="ghost" size="md" type="button" {...props}>{t(label)}</ui.Button>;
+}
+
 function Actions({ children }: { children: ReactNode }): ReactNode {
   return <div className="fm-dialog-actions">{children}</div>;
 }
@@ -316,47 +326,110 @@ export function UploadDialog({ t, ui, busy, errorText, error, transfers, plan, o
   onChange: (index: number, change: Partial<UploadGroup>) => void;
   onConfirm: () => void;
 }): ReactNode {
+  const [openPolicy, setOpenPolicy] = useState<number | null>(null);
+  const fieldId = useId();
+  useEffect(() => {
+    if (!plan || busy) setOpenPolicy(null);
+  }, [plan, busy]);
   if (!plan) return null;
   return (
     <ui.Modal
-      contentClassName="dsh-fm-dialog"
+      // Two scopes, because the Modal puts `className` on the card and
+      // `contentClassName` on the header/description/body wrapper: the footer is
+      // a sibling of that wrapper, and the card is the level the viewport can
+      // cap. One class cannot address both.
+      className="fm-upload-dialog"
+      contentClassName="dsh-fm-dialog fm-upload-dialog-content"
       open
       onClose={() => { if (!busy) onCancel(); }}
       title={t('uploadTitle')}
       closeLabel={t('close')}
       description={t('uploadDescription')}
-      footer={<Actions>
-        {dialogButton({ t, ui }, 'cancel', { disabled: busy, onClick: onCancel })}
-        {dialogButton({ t, ui }, 'uploadConfirm', {
+      footer={<div className="fm-dialog-actions fm-upload-actions">
+        {uploadAction({ t, ui }, 'cancel', { disabled: busy, onClick: onCancel })}
+        {uploadAction({ t, ui }, 'uploadConfirm', {
           variant: 'primary',
           disabled: busy || !transfers || plan.groups.some(group => group.conflict === 'rename' && !group.renamed),
           onClick: onConfirm, 'data-fm-action': 'upload-confirm',
         })}
-      </Actions>}
+      </div>}
     >
-      <div className="fm-dialog-content" style={{ maxHeight: '45vh', overflow: 'auto' }}>
+      <div className="fm-dialog-content fm-upload-content" onKeyDownCapture={event => {
+        // A portal still belongs to this React subtree. Consume Escape before
+        // the enclosing Modal's document listener can dismiss the whole review,
+        // and hand focus back to the control the list was opened from.
+        if (event.key !== 'Escape' || openPolicy === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpenPolicy(null);
+        event.currentTarget.querySelector<HTMLButtonElement>(`button[data-fm-upload-policy="${openPolicy}"]`)?.focus();
+      }}>
         <p>{`${plan.sources.length} ${t('items')} · ${plan.sources.reduce((total, item) => total + (item.file?.size ?? 0), 0).toLocaleString()} ${t('bytes')}`}</p>
-        {plan.groups.map((group, index) => (
-          <div key={group.name} style={{ marginBottom: 12 }}>
-            <strong>{group.name}</strong>{' '}
-            <select
-              value={group.conflict} aria-label={`${t('name')}: ${group.name}`} data-fm-upload-policy={index} disabled={busy}
-              onChange={event => onChange(index, { conflict: asUploadPolicy(event.target.value) })}
-            >
-              {!group.target ? <option value="error">{t('uploadFiles')}</option> : null}
-              <option value="skip">{t('skip')}</option>
-              <option value="rename">{t('renameConflict')}</option>
-              {group.kind === 'file' && group.target?.kind === 'file' ? <option value="overwrite">{t('overwrite')}</option> : null}
-            </select>
-            {group.conflict === 'rename' ? (
-              <ui.Input
-                className="fm-input" value={group.renamed} aria-label={`${t('rename')}: ${group.name}`}
-                onChange={(event: { target: { value: string } }) => onChange(index, { renamed: event.target.value })}
-              />
-            ) : null}
-            {group.target ? <details><summary>{t('versions')}</summary><code>{group.target.version}</code></details> : null}
-          </div>
-        ))}
+        {plan.groups.map((group, index) => {
+          // The policy set is the reviewed plan: `error` is the explicit
+          // pre-conflict state of a name the destination does not have yet,
+          // `overwrite` exists only where a file would replace a file, and a
+          // directory target can never be merged.
+          const policies = [
+            ...(!group.target ? [{ id: 'error', label: t('uploadFiles') }] : []),
+            { id: 'skip', label: t('skip') },
+            { id: 'rename', label: t('renameConflict') },
+            ...(group.kind === 'file' && group.target?.kind === 'file' ? [{ id: 'overwrite', label: t('overwrite') }] : []),
+          ];
+          const selectedLabel = policies.find(policy => policy.id === group.conflict)?.label ?? t('skip');
+          const open = openPolicy === index && !busy;
+          const labelId = `${fieldId}-${index}-label`;
+          const valueId = `${fieldId}-${index}-value`;
+          return (
+            <div className="fm-upload-item" key={group.name}>
+              <div className="fm-upload-filename">{group.name}</div>
+              <div className="fm-field">
+                <span id={labelId} className="fm-upload-label">{t('uploadConflictPolicy')}</span>
+                <ui.Menu
+                  className="fm-upload-policy-menu"
+                  open={open} portal autoFocus
+                  items={policies} selectedId={group.conflict}
+                  onClose={() => setOpenPolicy(null)}
+                  onSelect={id => {
+                    if (busy || !policies.some(policy => policy.id === id)) return;
+                    onChange(index, { conflict: asUploadPolicy(id) });
+                    setOpenPolicy(null);
+                  }}
+                  anchor={
+                    <ui.Button
+                      type="button" variant="ghost" className="fm-upload-policy-trigger"
+                      disabled={busy} data-fm-upload-policy={index}
+                      aria-haspopup="menu" aria-expanded={open} aria-labelledby={`${labelId} ${valueId}`}
+                      onClick={() => { if (!busy) setOpenPolicy(current => current === index ? null : index); }}
+                      onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+                        if (!busy && !open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+                          event.preventDefault();
+                          setOpenPolicy(index);
+                        }
+                      }}
+                    >
+                      <span id={valueId}>{selectedLabel}</span>
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </ui.Button>
+                  }
+                />
+              </div>
+              {group.conflict === 'rename' ? (
+                <label className="fm-field">
+                  <span className="fm-upload-label">{t('uploadNewName')}</span>
+                  <ui.Input
+                    className="fm-input" value={group.renamed} placeholder={group.name} aria-label={`${t('rename')}: ${group.name}`}
+                    data-fm-upload-name={index} disabled={busy}
+                    onChange={(event: { target: { value: string } }) => onChange(index, { renamed: event.target.value })}
+                  />
+                </label>
+              ) : null}
+              {group.target ? <details><summary>{t('versions')}</summary><code>{group.target.version}</code></details> : null}
+            </div>
+          );
+        })}
         {error ? <div role="alert">{errorText(error)}</div> : null}
       </div>
     </ui.Modal>

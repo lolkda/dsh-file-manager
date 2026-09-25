@@ -64,6 +64,42 @@ export const PANEL_CSS = `
 .dsh-fm-dialog .fm-paste-policy-trigger>svg{flex:none;color:var(--dsw-alias-label-secondary)}
 .dsh-fm-dialog .fm-paste-policy-trigger:focus-visible{outline:none;border-color:var(--dsw-alias-brand-primary)}
 .dsh-fm-dialog .fm-paste-policy-trigger[aria-expanded=true]{border-color:var(--dsw-alias-brand-primary)}
+/* Upload review: the same themed portal Menu, with a different row. The file
+   name, its policy label, the policy control and the on-demand rename field
+   stack in one column, and every level may shrink, so a long name wraps inside
+   the dialog instead of widening it. The policy trigger is a borderless ghost
+   control: normal, focus and expanded states draw no outline, no outer shadow
+   and no border layer. The hint is the design system's interactive overlay —
+   the first attempt used --dsw-alias-bg-layer-2, which the real page showed
+   resolving to the very same surface as the card, so focus was invisible; this
+   token is translucent over the card and is what the theme's own controls use
+   for the same interaction. Only this dialog's footer actions take the standard
+   (36px) size — the shared dialog helper keeps the small default everywhere
+   else. */
+.dsh-fm-dialog .fm-upload-content{display:flex;flex-direction:column;gap:16px;min-height:0;max-height:50vh;overflow-y:auto;overflow-x:hidden}
+.dsh-fm-dialog .fm-upload-item{display:flex;flex-direction:column;gap:12px;min-width:0}
+.dsh-fm-dialog .fm-upload-item+.fm-upload-item{padding-top:16px;border-top:1px solid var(--dsw-alias-border-l1)}
+.dsh-fm-dialog .fm-upload-filename{min-width:0;font-size:14px;font-weight:600;line-height:1.5;overflow-wrap:anywhere}
+.dsh-fm-dialog .fm-upload-label{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}
+.dsh-fm-dialog .fm-upload-policy-menu{display:flex;width:100%;min-width:0}
+.dsh-fm-dialog .fm-upload-policy-trigger{width:100%;min-width:0;justify-content:space-between;gap:12px;padding:0 12px;border:none;outline:none;box-shadow:none;border-radius:10px}
+.dsh-fm-dialog .fm-upload-policy-trigger>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-fm-dialog .fm-upload-policy-trigger>svg{flex:none;color:var(--dsw-alias-label-secondary)}
+.dsh-fm-dialog .fm-upload-policy-trigger:focus-visible{outline:none;background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-fm-dialog .fm-upload-policy-trigger[aria-expanded=true]{outline:none;background:var(--dsw-alias-interactive-bg-hover)}
+/* Height chain. The real page showed the card growing past a short viewport
+   (a 600x360 window overflowed its bottom edge), which is a missing height cap,
+   not a placement offset: no coordinate compensation belongs here. The Modal
+   puts the Modal className on the card and the contentClassName on the wrapper holding the
+   header, the description and the body — the footer is a sibling of that
+   wrapper, so a footer rule scoped by the wrapper could never match. The card is
+   therefore capped by the host's full-screen padding box, and every flex level
+   between it and the review body may shrink below its content: only
+   .fm-upload-content scrolls, and the footer keeps its height and stays visible. */
+.fm-upload-dialog{max-height:100%;min-height:0}
+.dsh-fm-dialog.fm-upload-dialog-content{min-height:0}
+.dsh-fm-dialog.fm-upload-dialog-content>*{min-height:0}
+.fm-upload-dialog .fm-upload-actions>button{min-height:36px}
 /* R21 code editor. The container fills the preview column where the legacy
    <pre>/<textarea> sat. This sheet declares layout and typography only: token
    colours come from the theme package's --shiki-* / --dsw-* variables, so a

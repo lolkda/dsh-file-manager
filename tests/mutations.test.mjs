@@ -1,18 +1,22 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, open, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, mkdir, open, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createHash } from 'node:crypto';
 import { createManager } from '../dist/host/manager.js';
 
 async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-write-'));
-  t.after(() => rm(base, { recursive: true, force: true }));
   const root = path.join(base, 'root');
   await mkdir(root);
   const manager = createManager(options);
   const grant = await manager.addRoot({ path: root });
+  // Close before removing: an open manager still holds root descriptors, and
+  // teardown must not race its pending work.
+  t.after(async () => {
+    await manager.close();
+    await rm(base, { recursive: true, force: true });
+  });
   const ref = relative => ({ rootId: grant.id, path: relative });
   return { base, root, manager, grant, ref };
 }
@@ -238,14 +242,21 @@ test('delete preparation is read-only and commit requires explicit confirmation'
   requireMethod(manager, 'prepareDelete'); requireMethod(manager, 'commitDelete');
   const plan = await manager.prepareDelete({ items: [ref('keep')] });
   assert.equal(plan.entryCount, 1);
-  assert.ok(plan.entries[0].version.endsWith(`:${createHash('sha256').update('keep').digest('hex')}`), 'the server deletion manifest must bind actual file contents');
-  assert.deepEqual(plan.entries, [{ rootId: ref('keep').rootId, path: 'keep', kind: 'file', size: 4, version: (await manager.stat(ref('keep'))).version }]);
+  // Approved contract change: permanent deletion binds a metadata snapshot
+  // (`dev:ino:size:mtimeNs:ctimeNs`), not the file contents, so the manifest token
+  // carries no digest and preparation stays off the content-verification budget.
+  const { MetadataVersionSchema, ContentVersionSchema } = await import('../dist/contracts/views.js');
+  const stats = await lstat(path.join(root, 'keep'), { bigint: true });
+  const token = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+  assert.equal(MetadataVersionSchema.safeParse(plan.entries[0].version).success, true, `the server deletion manifest must bind metadata, got ${plan.entries[0].version}`);
+  assert.equal(ContentVersionSchema.safeParse(plan.entries[0].version).success, false, 'a deletion manifest token must carry no content digest');
+  assert.deepEqual(plan.entries, [{ rootId: ref('keep').rootId, path: 'keep', kind: 'file', size: 4, version: token }]);
   assert.equal(await exists(path.join(root, 'keep')), true);
   await assert.rejects(manager.commitDelete({ planId: plan.id, confirmed: false }), { code: 'CONFIRMATION_REQUIRED' });
   assert.equal(await exists(path.join(root, 'keep')), true);
 });
 
-test('deletion preparation can be cancelled before content hashing completes', async t => {
+test('deletion preparation can be cancelled before its manifest is published', async t => {
   const { manager, root, ref } = await fixture(t);
   await writeFile(path.join(root, 'file'), 'content');
   const controller = new AbortController();
