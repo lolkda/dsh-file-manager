@@ -5,7 +5,8 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { FileManagerError, fail, normalizeError } from '../contracts/errors.js';
-import { DELETE_PLAN_MAX_ENTRIES, DELETE_PLAN_MAX_PENDING, DELETE_PLAN_MAX_SELECTIONS, DIRECTORY_PAGE_DEFAULT, DIRECTORY_PAGE_MAX, LIMIT_DEFAULTS, RELATIVE_PATH_MAX_LENGTH } from '../contracts/limits.js';
+import { DELETE_SCOPE, DELETE_PLAN_MAX_PENDING, DELETE_PLAN_MAX_SELECTIONS, DIRECTORY_PAGE_DEFAULT, DIRECTORY_PAGE_MAX, LIMIT_DEFAULTS, RELATIVE_PATH_MAX_LENGTH } from '../contracts/limits.js';
+import { deleteTree, type DeletionEffect } from './delete-tree.js';
 import { detectLineEndings, preserveLineEndings } from './line-endings.js';
 import {
   chargeVerification, createIO, createVerificationBudget,
@@ -68,6 +69,7 @@ export interface DeleteTarget { rootId: string; path: string }
 
 export interface DeletePlanView {
   id: string;
+  scope: typeof DELETE_SCOPE;
   targets: DeleteTarget[];
   entryCount: number;
   expiresAt: number;
@@ -78,11 +80,11 @@ export interface DeletePlanView {
 export interface DeleteCommitResult {
   id: string;
   status: 'completed' | 'partial';
-  results: Array<{ rootId: string; path: string; status: 'completed' | 'failed'; removed?: boolean; error?: { code: string; message: string; details?: Record<string, unknown> } }>;
+  results: Array<{ rootId: string; path: string; status: 'completed' | 'failed'; removed?: boolean; contentsChanged?: boolean; error?: { code: string; message: string; details?: Record<string, unknown> } }>;
 }
 
 interface DeletePlanEntry extends EntryView {
-  children?: string[] | undefined;
+  parentIdentity: string;
 }
 
 interface DeletePlan {
@@ -399,10 +401,6 @@ export function createManager(options: ManagerOptions = {}) {
     };
   }
 
-  async function statEntry(ref: RootPathRef): Promise<EntryView> {
-    return withParent(ref, async location => entryView({ rootId: String(ref.rootId), path: ref.path as string }, await fs.lstat(location.address, { bigint: true })));
-  }
-
   async function absent(address: string): Promise<void> {
     try { await fs.lstat(address); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -547,9 +545,10 @@ export function createManager(options: ManagerOptions = {}) {
     });
   }
 
-  /** Bind deletion to a server-held, postorder manifest rather than a fresh rm -r walk. */
+  /** Confirm selected names/identities; never enumerate a selected directory here. */
   async function prepareDelete({ items, signal }: { items?: unknown; signal?: AbortSignal } = {}): Promise<DeletePlanView> {
     if (!Array.isArray(items) || items.length === 0 || items.length > DELETE_PLAN_MAX_SELECTIONS) fail('INVALID_REQUEST', `Select between 1 and ${DELETE_PLAN_MAX_SELECTIONS} entries.`);
+    if (closed) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503);
     for (const [id, plan] of deletePlans) if ((!plan.promise || plan.result) && plan.expiresAt < now()) deletePlans.delete(id);
     if (deletePlans.size >= DELETE_PLAN_MAX_PENDING) fail('TOO_MANY_REQUESTS', 'Too many pending deletion confirmations.', 429);
     const selected = items.map((ref: { rootId?: unknown; path?: unknown }) => {
@@ -563,49 +562,23 @@ export function createManager(options: ManagerOptions = {}) {
     for (const ref of selected) if (!unique.some(parent => ref.absolute === parent.absolute || ref.absolute.startsWith(`${parent.absolute}/`))) unique.push(ref);
     const targets = unique.map(({ rootId, path: relativePath }) => ({ rootId, path: relativePath }));
     const entries: DeletePlanEntry[] = [];
-    // The manifest bound counts entries as they enter the walk, not as they are
-    // stored: the manifest is postorder, so a directory is pushed only after its
-    // whole subtree and would otherwise never be counted while it is walked. The
-    // same counter bounds a wide tree and a deep chain alike, and the visited
-    // entry is checked before it is inspected.
-    let visited = 0;
-    // One metadata pass builds the whole postorder manifest. Permanent deletion
-    // never reads file content and never charges the content-verification budget:
-    // a prepared entry binds a metadata snapshot (`dev:ino:size:mtimeNs:ctimeNs`)
-    // plus the membership of each directory, and every entry is re-checked as it
-    // is removed.
-    async function collect(ref: { rootId: string; path: string }): Promise<void> {
+    for (const ref of targets) {
       if (signal?.aborted) fail('CANCELLED', 'Deletion preparation was cancelled.', 499);
-      visited += 1;
-      if (visited > DELETE_PLAN_MAX_ENTRIES) fail('TOO_LARGE', `The deletion manifest exceeds ${DELETE_PLAN_MAX_ENTRIES} entries.`, 413);
-      const entry: DeletePlanEntry = await io.stat({ ...ref, signal, metadataOnly: true });
-      if (!['file', 'directory', 'symlink'].includes(entry.kind)) fail('UNSUPPORTED_ENTRY', 'A selected tree contains an unsupported entry.', 422);
-      if (entry.kind === 'directory') {
-        const directory = await openDirectory(rootOf(ref.rootId), partsOf(ref.path));
-        let children: string[];
-        try { children = (await fs.readdir(fdPath(directory))).sort(); }
-        finally { await directory.close(); }
-        for (const child of children) {
-          const childPath = `${ref.path}/${child}`;
-          if (pathViolation(childPath, false) !== undefined) {
-            fail('UNREPRESENTABLE_REFERENCE', 'This entry name cannot be represented safely by the current path grammar; it cannot be deleted or included in an operation.', 422);
-          }
-          await collect({ rootId: ref.rootId, path: childPath });
-        }
-        entry.children = children;
-        if ((await statEntry(ref)).version !== entry.version) fail('VERSION_CONFLICT', 'The directory changed during deletion preparation.', 409);
-      }
-      entries.push(entry);
+      entries.push(await withParent(ref, async location => {
+        const entry = entryView(ref, await fs.lstat(location.address, { bigint: true }));
+        if (!['file', 'directory', 'symlink'].includes(entry.kind)) fail('UNSUPPORTED_ENTRY', 'A selected entry has an unsupported type.', 422);
+        const parentIdentity = identity(await location.parent.stat({ bigint: true }));
+        await verifyParent(location);
+        return { ...entry, parentIdentity };
+      }));
     }
-    for (const ref of targets) await collect(ref);
-    // Last checkpoint before the manifest becomes usable: a cancellation that
-    // arrived while the tree was walked must not publish a plan.
     if (signal?.aborted) fail('CANCELLED', 'Deletion preparation was cancelled.', 499);
+    if (closed) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503);
     const id = randomUUID();
     const expiresAt = now() + deletePlanTtlMs;
     deletePlans.set(id, { id, targets, entries, expiresAt, promise: null, result: null });
     return {
-      id, targets: structuredClone(targets), entryCount: entries.length, expiresAt, permanent: true,
+      id, scope: DELETE_SCOPE, targets: structuredClone(targets), entryCount: entries.length, expiresAt, permanent: true,
       entries: entries.map(({ rootId, path: entryPath, kind, size, version }) => ({ rootId, path: entryPath, kind, size, version })),
     };
   }
@@ -619,51 +592,51 @@ export function createManager(options: ManagerOptions = {}) {
     if (now() > plan.expiresAt) return Promise.reject(new FileManagerError('PLAN_EXPIRED', 'The deletion confirmation expired. Prepare it again.', 409));
     plan.promise = mutate<DeleteCommitResult>(async () => {
       if (now() > plan.expiresAt) fail('PLAN_EXPIRED', 'The deletion confirmation expired while waiting.', 409);
-      // Whole-manifest precheck: every entry, whatever its type, must still carry
-      // the prepared metadata snapshot, and every prepared directory must still
-      // have exactly the members it was prepared with.
-      for (const entry of plan.entries) {
-        let current: EntryView;
-        try { current = await io.stat({ ...entry, metadataOnly: true }); }
+      const selectedVersions = new Map(plan.entries.filter(entry => entry.kind !== 'directory').map(entry => [entry.identity, entry.version]));
+      const check = async (entry: DeletePlanEntry, location: ParentLocation, expectedVersion = entry.version): Promise<BigIntStats> => {
+        if (identity(await location.parent.stat({ bigint: true })) !== entry.parentIdentity) fail('PATH_CHANGED', 'The selected parent directory was replaced.', 409);
+        await verifyParent(location);
+        let current: BigIntStats;
+        try { current = await fs.lstat(location.address, { bigint: true }); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail('VERSION_CONFLICT', 'A prepared deletion target no longer exists.', 409); throw error; }
-        if (current.kind !== entry.kind || current.version !== entry.version) {
-          fail('VERSION_CONFLICT', 'A prepared deletion target changed. Review a fresh confirmation.', 409);
-        }
-        if (entry.kind === 'directory') {
-          const directory = await openDirectory(rootOf(entry.rootId), partsOf(entry.path));
-          try {
-            const children = (await fs.readdir(fdPath(directory))).sort();
-            if (children.join('\0') !== (entry.children ?? []).join('\0')) fail('VERSION_CONFLICT', 'The prepared directory membership changed. Review a fresh confirmation.', 409);
-          } finally { await directory.close(); }
-        }
-      }
+        const matches = kindOf(current) === entry.kind && (entry.kind === 'directory'
+          ? identity(current) === entry.identity
+          : stamp(current) === expectedVersion);
+        if (!matches) fail('VERSION_CONFLICT', 'A selected deletion target changed. Review a fresh confirmation.', 409);
+        return current;
+      };
+      // Precheck the selections only, before changing anything. A directory's
+      // contents are within the confirmed scope, not a frozen per-file snapshot.
+      for (const entry of plan.entries) await withParent(entry, location => check(entry, location));
       const results: DeleteCommitResult['results'] = [];
       for (const entry of plan.entries) {
-        let removed = false;
+        const effect: DeletionEffect = { removed: false, contentsChanged: false };
         try {
           await withParent(entry, async location => {
-            const current = await fs.lstat(location.address, { bigint: true });
-            // Files and links are bound to their full metadata stamp plus their
-            // explicit kind. A directory's own stamp moves while this operation
-            // removes its children, so the final rmdir is bound to the prepared
-            // identity and stays non-recursive: it can only succeed while the
-            // directory is still empty, so a member added meanwhile is never
-            // removed with it.
-            const matches = entry.kind === 'directory'
-              ? identity(current) === entry.identity && current.isDirectory()
-              : kindOf(current) === entry.kind && stamp(current) === entry.version;
-            if (!matches) fail('VERSION_CONFLICT', 'The target changed during deletion.', 409);
-            await verifyParent(location);
-            if (entry.kind === 'directory') await fs.rmdir(location.address);
-            else await fs.unlink(location.address);
-            removed = true;
-            await location.parent.sync();
+            // Only execution may use a version updated by our own unlink. The
+            // precheck above must never merge distinct prepared hard-link stamps.
+            const current = await check(entry, location, selectedVersions.get(entry.identity));
+            let failed = false;
+            let failure: unknown;
+            try {
+              await deleteTree({
+                parent: location.parent, name: location.name, expected: current,
+                verifyParent: () => verifyParent(location), selectedVersions, effect,
+              });
+            } catch (error) { failed = true; failure = error; }
+            // The tree walker syncs each changed child directory once. Preserve
+            // its first failure and any removal facts even if the parent sync fails.
+            if (effect.contentsChanged) {
+              try { await location.parent.sync(); }
+              catch (error) { if (!failed) { failed = true; failure = error; } }
+            }
+            if (failed) throw failure;
           });
           results.push({ rootId: entry.rootId, path: entry.path, status: 'completed' });
         } catch (error) {
           const failure = normalizeError(error, { profile: 'control' });
           results.push({
-            rootId: entry.rootId, path: entry.path, status: 'failed', removed,
+            rootId: entry.rootId, path: entry.path, status: 'failed', ...effect,
             error: { code: failure.code, message: failure.message, details: failure.details },
           });
         }

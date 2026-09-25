@@ -52,7 +52,7 @@ export interface OpenDocument {
   readonly missing: boolean;
   readonly editing: boolean;
   readonly saving: boolean;
-  /** Identity of the save attempt that currently owns the document, if any. */
+  /** Save/read generation; deletion also invalidates every older response. */
   readonly attempt: number;
 }
 
@@ -288,7 +288,7 @@ export function createDocumentStore(): DocumentStore {
     markMissing(rootId, prefix) {
       commit(state.documents.map(document => (
         document.rootId === rootId && (!prefix || document.path === prefix || document.path.startsWith(`${prefix}/`))
-          ? { ...document, missing: true }
+          ? { ...document, missing: true, saving: false, attempt: document.attempt + 1 }
           : document
       )));
     },

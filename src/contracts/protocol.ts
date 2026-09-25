@@ -309,6 +309,8 @@ export const DeletePrepareResultSchema = DeletePlanSchema;
 
 export const DeleteCommitRequestSchema = z.object({
   op: z.literal('delete.commit'),
+  // An old Client must not authorize recursive deletion using manifest wording.
+  scope: z.literal('selected-trees'),
   planId: z.string().min(1),
   /** Must be exactly `true`; otherwise `CONFIRMATION_REQUIRED` / 400. */
   confirmed: z.boolean().optional(),

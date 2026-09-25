@@ -316,7 +316,7 @@ test('R15: verification failures never modify files and report commit facts', { 
   const prepared = await fixture.call('delete.prepare', { items: [fixture.ref('target.txt')] });
   assert.equal(prepared.status, 200);
   writeFileSync(file, 'second');
-  const commit = await fixture.call('delete.commit', { planId: prepared.value.id, confirmed: true });
+  const commit = await fixture.call('delete.commit', { planId: prepared.value.id, scope: prepared.value.scope, confirmed: true });
   record(evidence, 'budget-failure-semantics', `stale delete.commit -> ${commit.status} ${commit.error?.code}`);
   assert.equal(commit.status, 409);
   assert.equal(commit.error.code, 'VERSION_CONFLICT');

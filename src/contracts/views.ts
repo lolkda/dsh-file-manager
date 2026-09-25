@@ -444,6 +444,7 @@ export const DeletePlanEntrySchema = z.object({
 
 export const DeletePlanSchema = z.object({
   id: z.string().min(1),
+  scope: z.literal('selected-trees'),
   targets: z.array(RootPathRefSchema).min(1),
   entryCount: NonNegativeIntegerSchema,
   expiresAt: EpochMillisSchema,
@@ -460,6 +461,8 @@ export const DeleteCommitResultSchema = z.object({
     path: EntryChildPathSchema,
     status: z.enum(['completed', 'failed']),
     removed: z.boolean().optional(),
+    /** Descendants may have been removed even if the selected directory remains. */
+    contentsChanged: z.boolean().optional(),
     error: z.object({ code: ErrorCodeSchema, message: z.string().min(1) }).strict().optional(),
   }).strict()),
 }).strict();
@@ -823,6 +826,7 @@ export function toDeletePlan(plan: unknown): DeletePlan {
   });
   return requireParsed(DeletePlanSchema, {
     id: stringField(record, 'id', 'delete plan'),
+    scope: requireField(record, 'scope', 'delete plan'),
     targets,
     entryCount: integerField(record, 'entryCount', 'delete plan'),
     expiresAt: integerField(record, 'expiresAt', 'delete plan'),
@@ -843,6 +847,7 @@ export function toDeleteCommitResult(result: unknown): DeleteCommitResult {
       path: stringField(item, 'path', 'delete result entry'),
       status: requireField(item, 'status', 'delete result entry'),
       ...(typeof removed === 'boolean' ? { removed } : {}),
+      ...(typeof item.contentsChanged === 'boolean' ? { contentsChanged: item.contentsChanged } : {}),
       ...(error === undefined ? {} : {
         error: { code: stringField(error, 'code', 'delete result error'), message: stringField(error, 'message', 'delete result error') },
       }),

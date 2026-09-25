@@ -275,25 +275,32 @@ test('renaming a file accepts its strong selected version without silently refre
   assert.equal(await readFile(path.join(root, 'renamed'), 'utf8'), 'content');
 });
 
-test('confirmed recursive deletion removes exactly the prepared tree', async t => {
+test('confirmed deletion removes the selected directory whole and nothing else', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder')); await writeFile(path.join(root, 'folder', 'file'), 'data');
+  await writeFile(path.join(root, 'sibling'), 'sibling');
   requireMethod(manager, 'prepareDelete'); requireMethod(manager, 'commitDelete');
   const plan = await manager.prepareDelete({ items: [ref('folder')] });
-  assert.equal(plan.entryCount, 2);
+  assert.equal(plan.entryCount, 1, 'a selected directory is one target: its contents are removed with it, never planned as entries');
   const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
   assert.equal(result.status, 'completed');
   assert.equal(await exists(path.join(root, 'folder')), false);
+  assert.equal(await readFile(path.join(root, 'sibling'), 'utf8'), 'sibling', 'an unselected sibling must survive the confirmed deletion');
 });
 
-test('a changed deletion manifest is rejected without deleting its new contents', async t => {
+test('a member added after preparation is deleted with the selected directory', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder')); await writeFile(path.join(root, 'folder', 'old'), 'old');
   requireMethod(manager, 'prepareDelete'); requireMethod(manager, 'commitDelete');
   const plan = await manager.prepareDelete({ items: [ref('folder')] });
+  assert.equal(plan.entryCount, 1);
   await writeFile(path.join(root, 'folder', 'new'), 'new');
-  await assert.rejects(manager.commitDelete({ planId: plan.id, confirmed: true }), { code: 'VERSION_CONFLICT' });
-  assert.deepEqual((await readdir(path.join(root, 'folder'))).sort(), ['new', 'old']);
+  // The confirmation covers the selected directory, so content created after
+  // preparation is inside its scope and is removed with it.
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed', `content added inside the selected directory must be deleted with it: ${JSON.stringify(result.results)}`);
+  assert.equal(await exists(path.join(root, 'folder')), false, 'the whole selected directory, added content included, must be gone');
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('duplicate delete commit returns its receipt and cannot delete a newly recreated file', async t => {
@@ -348,12 +355,17 @@ test('completed deletion receipts expire instead of exhausting the confirmation 
   assert.equal(await exists(path.join(root, 'file')), false);
 });
 
-// A selected ancestor owns its prepared subtree only once.
+// A selected ancestor owns its selected subtree only once.
 test('overlapping ancestor and descendant selections are deduplicated before deletion', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder')); await writeFile(path.join(root, 'folder', 'file'), 'data');
   requireMethod(manager, 'prepareDelete');
   const plan = await manager.prepareDelete({ items: [ref('folder/file'), ref('folder'), ref('folder')] });
-  assert.equal(plan.entryCount, 2);
+  assert.equal(plan.entryCount, 1, 'the two duplicates and the covered descendant collapse into the one selected directory');
   assert.equal(plan.targets.length, 1);
+  assert.deepEqual(plan.entries.map(entry => entry.path), ['folder']);
+
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed');
+  assert.equal(await exists(path.join(root, 'folder')), false, 'the deduplicated selection still deletes the whole directory');
 });

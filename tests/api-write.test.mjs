@@ -108,10 +108,10 @@ test('wire-level deletion uses the server-held confirmation rather than client f
   await manager.createFile({ ...ref('file'), text: 'contents' });
   const plan = (await (await call({ op: 'delete.prepare', items: [ref('file')] })).json()).value;
   assert.ok(plan?.id);
-  const refused = await call({ op: 'delete.commit', planId: plan.id, confirmed: false });
+  const refused = await call({ op: 'delete.commit', planId: plan.id, scope: plan.scope, confirmed: false });
   assert.equal(refused.status, 400);
   assert.equal((await refused.json()).error.code, 'CONFIRMATION_REQUIRED');
-  const completed = await call({ op: 'delete.commit', planId: plan.id, confirmed: true });
+  const completed = await call({ op: 'delete.commit', planId: plan.id, scope: plan.scope, confirmed: true });
   assert.equal(completed.status, 200);
   assert.equal((await completed.json()).value.status, 'completed');
 });

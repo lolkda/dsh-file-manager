@@ -1,21 +1,25 @@
 /**
- * task-3 phase 1 (red tests): permanent deletion is a metadata-and-membership
- * operation.
+ * task-3 phase 1: permanent deletion confirms the *selected names*, not a
+ * prepared subtree.
  *
  * Approved contract change: `delete.prepare` / `delete.commit` never read file
- * content, never compute a SHA-256 and never charge `maxVerificationBytes`. A
- * prepared entry binds a metadata token (`dev:ino:size:mtimeNs:ctimeNs`) plus a
- * directory membership snapshot instead. It is deliberately a *weaker* proof than
- * a content version, but not a toothless one: an ordinary same-size rewrite is
- * still caught, because the token carries `size`, `mtimeNs` and `ctimeNs` (the
- * rewrite and inode-replacement cases below pin exactly that), and directory
- * membership is compared as well. What the Host does **not** claim is a CAS
- * guarantee: another process that races the deletion at an arbitrary moment —
- * including between the last check and the final unlink/rmdir — is outside the
- * promise. The token is therefore never accepted where an overwrite or a
- * transfer-source deletion is authorized; those paths (save / overwrite /
- * copy-download / cross-volume move) keep full content verification unchanged and
- * are asserted in their own suites.
+ * content, never compute a SHA-256 and never charge `maxVerificationBytes`, and
+ * preparation never walks a selected directory. One selection is one manifest
+ * entry: a selected directory binds its identity (`dev:ino`) and is deleted as a
+ * whole at execution time — its descendants, including names the path grammar
+ * cannot express and members added or removed after preparation, are enumerated
+ * only while it is removed. A selected regular file or symlink binds its full
+ * metadata token (`dev:ino:size:mtimeNs:ctimeNs`) instead. That token is
+ * deliberately a *weaker* proof than a content version, but not a toothless one:
+ * an ordinary same-size rewrite is still caught, because the token carries
+ * `size`, `mtimeNs` and `ctimeNs` (the rewrite and inode-replacement cases below
+ * pin exactly that). What the Host does **not** claim is a CAS guarantee:
+ * another process that races the deletion at an arbitrary moment — including
+ * between the last check and the final unlink/rmdir — is outside the promise.
+ * The token is therefore never accepted where an overwrite or a transfer-source
+ * deletion is authorized; those paths (save / overwrite / copy-download /
+ * cross-volume move) keep full content verification unchanged and are asserted
+ * in their own suites.
  *
  * What the observations in this file can and cannot prove:
  *
@@ -241,14 +245,15 @@ test('a file larger than the content-verification budget can still be prepared a
   assert.equal(await exists(file), false);
 });
 
-test('the prepared manifest binds every entry to a metadata token, never a content digest', async t => {
+test('the prepared manifest binds each selected target to a metadata token, never a content digest', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder'));
   await writeFile(path.join(root, 'folder', 'a'), 'aa');
   await writeFile(path.join(root, 'folder', 'b'), 'bb');
 
   const plan = await manager.prepareDelete({ items: [ref('folder')] });
-  assert.equal(plan.entryCount, 3);
+  assert.equal(plan.entryCount, 1, 'one selection is one entry: a selected directory is never enumerated while preparing');
+  assert.deepEqual(plan.entries.map(entry => entry.path), ['folder'], 'the manifest must list the selected directory and none of its children');
   for (const entry of plan.entries) {
     const stats = await lstat(path.join(root, ...entry.path.split('/')), { bigint: true });
     assertMetadataToken(entry.version, stats);
@@ -268,7 +273,8 @@ test('a deeply nested selected directory is deleted exactly and an unselected si
 
   const plan = await manager.prepareDelete({ items: [ref('deep')] });
   assert.equal(plan.targets.length, 1);
-  assert.equal(plan.entryCount, 1 + levels.length + 1, 'the manifest must list every nested directory plus the leaf file');
+  assert.equal(plan.entryCount, 1, 'a selected directory is one target, however deep the tree below it is');
+  assert.deepEqual(plan.entries.map(entry => entry.path), ['deep']);
 
   const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
   assert.equal(result.status, 'completed');
@@ -299,22 +305,21 @@ test('selecting one .js file 20 levels deep deletes only that file', async t => 
   assert.equal(await readFile(path.join(root, levels[0], 'top.js'), 'utf8'), 'keep too');
 });
 
-test('the prepared manifest is postorder: a directory follows all of its children', async t => {
+test('preparing a selected directory lists that directory alone, never its children', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder', 'nested'), { recursive: true });
   await writeFile(path.join(root, 'folder', 'a'), 'a');
   await writeFile(path.join(root, 'folder', 'nested', 'b'), 'b');
 
   const plan = await manager.prepareDelete({ items: [ref('folder')] });
-  const position = new Map(plan.entries.map((entry, index) => [entry.path, index]));
-  for (const entry of plan.entries) {
-    const parent = entry.path.split('/').slice(0, -1).join('/');
-    if (position.has(parent)) {
-      assert.ok(position.get(parent) > position.get(entry.path),
-        `postorder: ${parent} must be listed after its child ${entry.path}`);
-    }
-  }
-  assert.equal(position.get('folder'), plan.entries.length - 1, 'the selected directory must be removed after its whole subtree');
+  assert.equal(plan.entryCount, 1);
+  assert.deepEqual(plan.entries.map(entry => entry.path), ['folder'],
+    'the manifest must list the selected directory itself and none of its descendants');
+
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.results.map(item => item.path), ['folder'], 'one selected target produces one result');
+  assert.equal(await exists(path.join(root, 'folder')), false, 'the whole subtree is removed at execution time');
 });
 
 test('an unreadable file is deleted when its parent directory is writable', async t => {
@@ -399,16 +404,28 @@ test('an entry type the deletion engine cannot remove fails preparation without 
   assert.equal(await readFile(path.join(root, 'keep'), 'utf8'), 'keep');
 });
 
-test('a name the path grammar cannot express fails preparation without touching the tree', async t => {
+test('a directory holding a name the grammar cannot express is deleted as a whole, while selecting that name is still refused', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder'));
   await writeFile(path.join(root, 'folder', 'plain'), 'plain');
   // A backslash is a legal Linux file name but not part of the addressable grammar.
   await writeFile(path.join(root, 'folder', 'bad\\name'), 'bad');
 
-  await assert.rejects(manager.prepareDelete({ items: [ref('folder')] }), { code: 'UNREPRESENTABLE_REFERENCE' });
+  // Selecting the unexpressible name itself stays impossible: a selection is a
+  // path the grammar can address, so it is refused before anything is touched
+  // (the code is the grammar failure `INVALID_PATH`, not a manifest refusal).
+  await assert.rejects(manager.prepareDelete({ items: [ref('folder/bad\\name')] }), { code: 'INVALID_PATH' });
   assert.deepEqual((await readdir(path.join(root, 'folder'))).sort(), ['bad\\name', 'plain']);
-  assert.equal(await readFile(path.join(root, 'folder', 'plain'), 'utf8'), 'plain');
+
+  // The containing directory is addressable, so it is deleted as a whole: the
+  // member the UI cannot name is enumerated only while the tree is removed.
+  const plan = await manager.prepareDelete({ items: [ref('folder')] });
+  assert.equal(plan.entryCount, 1);
+  assert.deepEqual(plan.entries.map(entry => entry.path), ['folder']);
+  assert.deepEqual((await readdir(path.join(root, 'folder'))).sort(), ['bad\\name', 'plain'], 'preparing must not touch the tree');
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed');
+  assert.equal(await exists(path.join(root, 'folder')), false, 'the whole directory, unexpressible member included, must be removed');
 });
 
 test('a failed preparation does not consume a pending-confirmation slot', async t => {
@@ -436,54 +453,40 @@ test('the selection bound stays at 10000 and refuses an oversized selection up f
   assert.deepEqual(await readdir(root), [], 'an oversized selection must never be resolved');
 });
 
-test('a tree that grows past 10000 entries is refused by the entry bound without a full pre-scan', async t => {
-  const started = Date.now();
+test('a directory holding more than 10000 entries is prepared as one target and deleted whole', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'tree'));
-  // 10000 empty regular files, named to sort before the poison, created with
-  // bounded concurrency so the fixture never holds thousands of descriptors.
+  await mkdir(path.join(root, 'sibling'));
+  await writeFile(path.join(root, 'sibling', 'keep.txt'), 'keep');
+  // 10000 empty regular files, created with bounded concurrency so the fixture
+  // never holds thousands of descriptors at once.
   const names = Array.from({ length: 10000 }, (_, index) => `a${String(index).padStart(5, '0')}`);
   await writeMany(path.join(root, 'tree'), names);
   assert.equal((await readdir(path.join(root, 'tree'))).length, 10000);
 
-  // This tree already holds 10001 manifest entries: the 10000 files plus the
-  // selected directory itself. In a postorder manifest the directory is pushed
-  // last, so a bound that only counts already-pushed entries would let it
-  // through with entryCount 10001. The bound must count an entry as it enters
-  // the walk, directories included.
-  const overflow = Date.now();
-  const withoutPoison = await manager.prepareDelete({ items: [ref('tree')] }).then(() => null, error => error);
-  console.log(`[delete-metadata] 10000-file manifest case took ${Date.now() - overflow}ms`);
-  assert.ok(withoutPoison, 'a tree with 10000 files plus its own directory entry exceeds the manifest bound and must be refused');
-  assert.equal(withoutPoison.code, 'TOO_LARGE',
-    `the manifest bound must count the directory still being walked, got ${withoutPoison.code}: ${withoutPoison.message}`);
-  assert.equal(withoutPoison.status, 413);
-  const intact = await readdir(path.join(root, 'tree'));
-  assert.equal(intact.length, 10000, 'a refused manifest must remove nothing at all');
-  assert.equal(await readFile(path.join(root, 'tree', 'a09999'), 'utf8'), '');
+  // A socket is an entry type a *directly selected* name cannot be deleted as,
+  // and it sorts last. Preparing the containing directory must never inspect it:
+  // one selection is one manifest entry, so the 10000 files below it can no
+  // longer trip any entry bound, and execution removes the socket with the tree.
+  await withSocket(path.join(root, 'tree', 'z-socket'), async () => {
+    // Durations are printed because this is the slowest case in the file; they
+    // are input for deciding whether it has to be isolated, never an assertion.
+    const preparedAt = Date.now();
+    const plan = await manager.prepareDelete({ items: [ref('tree')] });
+    const prepareMs = Date.now() - preparedAt;
+    assert.equal(plan.entryCount, 1, 'the manifest counts the selected directory, never the entries inside it');
+    assert.deepEqual(plan.entries.map(entry => entry.path), ['tree']);
 
-  // The poison sorts last and is an entry type deletion cannot remove. A full
-  // metadata pre-scan would reach it and report UNSUPPORTED_ENTRY; counting an
-  // entry as it enters the manifest must instead stop the oversized manifest
-  // with TOO_LARGE, before the poison is ever inspected.
-  await withSocket(path.join(root, 'tree', 'z-poison'), async () => {
-    try {
-      const rejected = await manager.prepareDelete({ items: [ref('tree')] }).then(() => null, error => error);
-      assert.ok(rejected, 'a manifest that exceeds the entry bound must be refused');
-      assert.equal(rejected.code, 'TOO_LARGE',
-        `the entry bound must trip before the trailing unsupported entry is inspected, got ${rejected.code}: ${rejected.message}`);
-      assert.equal(rejected.status, 413);
-      const remaining = await readdir(path.join(root, 'tree'));
-      assert.equal(remaining.length, 10001, 'a refused manifest must remove nothing at all');
-      assert.equal(remaining.includes('z-poison'), true);
-      assert.equal(await readFile(path.join(root, 'tree', 'a09999'), 'utf8'), '');
-    } finally {
-      // Printed rather than hidden, and printed even while this case is red: this
-      // is the slowest case in the file, so its duration is the input for
-      // deciding whether it has to be isolated.
-      console.log(`[delete-metadata] 10001-entry manifest case took ${Date.now() - started}ms total`);
-    }
+    const committedAt = Date.now();
+    const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+    console.log(`[delete-metadata] 10001-entry directory: prepare ${prepareMs}ms, delete ${Date.now() - committedAt}ms`);
+    assert.equal(result.status, 'completed', `deleting the whole selected directory must succeed: ${JSON.stringify(result.results)}`);
+    assert.deepEqual(result.results.map(item => item.path), ['tree']);
   });
+
+  assert.equal(await exists(path.join(root, 'tree')), false, 'the whole selected directory must be gone');
+  assert.deepEqual(await readdir(root), ['sibling'], 'an unselected sibling must survive');
+  assert.equal(await readFile(path.join(root, 'sibling', 'keep.txt'), 'utf8'), 'keep');
 });
 
 test('a same-size rewrite that restores the mtime is still detected before deletion', async t => {
@@ -530,29 +533,35 @@ test('replacing the prepared file with a different inode is refused', async t =>
   assert.equal(await readFile(file, 'utf8'), 'bbbb');
 });
 
-test('removing a member from a prepared directory is refused', async t => {
+test('removing a member from a prepared directory still deletes the whole selected directory', async t => {
+  // The confirmation covers the selected directory, not a frozen member list:
+  // the member set is read once, while the tree is removed.
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder'));
   await writeFile(path.join(root, 'folder', 'a'), 'a');
   await writeFile(path.join(root, 'folder', 'b'), 'b');
 
   const plan = await manager.prepareDelete({ items: [ref('folder')] });
+  assert.equal(plan.entryCount, 1);
   await rm(path.join(root, 'folder', 'b'));
-  await assert.rejects(manager.commitDelete({ planId: plan.id, confirmed: true }), { code: 'VERSION_CONFLICT' });
-  assert.deepEqual(await readdir(path.join(root, 'folder')), ['a']);
+
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed', `a member removed after preparation must not invalidate the selected directory: ${JSON.stringify(result.results)}`);
+  assert.equal(await exists(path.join(root, 'folder')), false, 'the selected directory must be removed whole');
+  assert.deepEqual(await readdir(root), []);
 });
 
-test('a directory whose own metadata moved is refused even with members and inode unchanged', async t => {
-  // The prepared directory token is the full metadata stamp, not an identity:
+test('a directory whose own metadata moved is still deleted as a whole', async t => {
+  // A selected directory is bound by its identity, not by its metadata stamp:
   // touching only the directory (no member change, no new inode, no content
-  // change) must still invalidate the manifest.
+  // change) keeps the confirmation valid, and the tree is still removed whole.
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'folder'));
   await writeFile(path.join(root, 'folder', 'keep.txt'), 'contents');
   const before = await lstat(path.join(root, 'folder'), { bigint: true });
 
   const plan = await manager.prepareDelete({ items: [ref('folder')] });
-  assert.equal(plan.entryCount, 2);
+  assert.equal(plan.entryCount, 1);
 
   await utimes(path.join(root, 'folder'), 1700000000.5, 1700000000.5);
   const after = await lstat(path.join(root, 'folder'), { bigint: true });
@@ -562,12 +571,10 @@ test('a directory whose own metadata moved is refused even with members and inod
   assert.deepEqual(await readdir(path.join(root, 'folder')), ['keep.txt'], 'the member set must be unchanged');
   assert.equal(await readFile(path.join(root, 'folder', 'keep.txt'), 'utf8'), 'contents');
 
-  const rejected = await manager.commitDelete({ planId: plan.id, confirmed: true }).then(() => null, error => error);
-  assert.ok(rejected, 'a directory whose own metadata moved must invalidate the prepared manifest');
-  assert.equal(rejected.code, 'VERSION_CONFLICT');
-  assert.equal(rejected.status, 409);
-  assert.deepEqual(await readdir(root), ['folder'], 'a refused manifest must leave the tree untouched');
-  assert.equal(await readFile(path.join(root, 'folder', 'keep.txt'), 'utf8'), 'contents');
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed', `a directory whose own metadata moved keeps its identity and must still be deleted: ${JSON.stringify(result.results)}`);
+  assert.equal(await exists(path.join(root, 'folder')), false);
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('a prepared directory replaced by a new inode is refused even with the same members', async t => {
@@ -596,7 +603,7 @@ test('a prepared directory replaced by a new inode is refused even with the same
   assert.deepEqual((await readdir(root)).sort(), ['folder', 'moved']);
 });
 
-test('a new member deep inside a prepared tree rejects the whole manifest, not just that entry', async t => {
+test('content added deep inside a selected tree is deleted with it, and an unaffected selection still completes', async t => {
   const { manager, root, ref } = await fixture(t);
   await mkdir(path.join(root, 'outer', 'inner'), { recursive: true });
   await writeFile(path.join(root, 'outer', 'inner', 'a'), 'a');
@@ -604,14 +611,17 @@ test('a new member deep inside a prepared tree rejects the whole manifest, not j
 
   const plan = await manager.prepareDelete({ items: [ref('outer'), ref('other')] });
   assert.equal(plan.targets.length, 2);
+  assert.equal(plan.entryCount, 2);
   await writeFile(path.join(root, 'outer', 'inner', 'new'), 'new');
 
-  const rejected = await manager.commitDelete({ planId: plan.id, confirmed: true }).then(() => null, error => error);
-  assert.ok(rejected, 'a manifest whose membership changed must be refused');
-  assert.equal(rejected.code, 'VERSION_CONFLICT');
-  assert.equal(rejected.status, 409);
-  assert.equal(await exists(path.join(root, 'other')), true, 'a refused manifest must not delete its unaffected targets either');
-  assert.deepEqual((await readdir(path.join(root, 'outer', 'inner'))).sort(), ['a', 'new']);
+  const result = await manager.commitDelete({ planId: plan.id, confirmed: true });
+  assert.equal(result.status, 'completed',
+    `content added inside a selected directory is inside its scope and must be deleted with it: ${JSON.stringify(result.results)}`);
+  assert.deepEqual(result.results.map(item => item.path).sort(), ['other', 'outer']);
+  assert.deepEqual(result.results.map(item => item.status), ['completed', 'completed']);
+  assert.equal(await exists(path.join(root, 'outer')), false, 'the whole selected directory, added content included, must be gone');
+  assert.equal(await exists(path.join(root, 'other')), false, 'the unaffected selected file must still be removed');
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('a prepared target that disappeared is refused with a conflict, not a partial success', async t => {

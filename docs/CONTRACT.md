@@ -170,7 +170,7 @@ errno 型错误的 `details` 只保留 `committed` / `cleanupFailed` / `stagingN
 
 | 概念 | 形态 | 产生方式 | 能做什么 | 不能做什么 |
 | --- | --- | --- | --- | --- |
-| 元数据快照 `MetadataVersion` | `dev:ino:size:mtimeNs:ctimeNs`（`^\d+:\d+:\d+:\d+:\d+$`） | 目录列举 / `lstat`，廉价 | 选择、浏览、引用、重命名比对、删除清单比对 | 授权覆盖写入；不启动全文哈希 |
+| 元数据快照 `MetadataVersion` | `dev:ino:size:mtimeNs:ctimeNs`（`^\d+:\d+:\d+:\d+:\d+$`） | 目录列举 / `lstat`，廉价 | 选择、浏览、引用、重命名比对、单独选中文件/链接删除比对（目录删除仅绑定身份） | 授权覆盖写入；不启动全文哈希 |
 | 内容强版本 `ContentVersion` | `元数据版本:sha256`（`^...:[0-9a-f]{64}$`） | 有界、可取消的实际字节读取 | 保存文本、覆盖目标、内容搬运/核验 | —— |
 | 恢复证明（私有） | `checkpoint`、`manifest`、`targetManifest`、`targetParent`、`receipt`、`identity`、`sha256`、`measured`、`destinationIdentity` | 任务/传输引擎在发布前后写入原始记录 | 冷启动恢复、删源前重证 | **永不进入公开视图** |
 
@@ -179,7 +179,7 @@ errno 型错误的 `details` 只保留 `committed` / `cleanupFailed` / `stagingN
 - 类型层：`ContentVersion` 与 `MetadataVersion` 是不同 brand，`ContentVersion` 不能由 `string` 或弱版本填充；`requireContentVersion` 的返回类型就是 `ContentVersion`。
 - 运行时层：`requireContentVersion(value)` 对弱版本、空值、格式错误一律 `STRONG_VERSION_REQUIRED`/409；`requireEntryVersion(value)` 缺失即 `VERSION_REQUIRED`/409。
 - Host 在真正替换内容前（覆盖、删源、发布后核验）必须再取一次强版本并比对；**任何"弱版本当作强版本"的路径都视为契约违规**。
-- 目录/符号链接的版本是弱版本（`stamp`），目录一致性靠成员清单比对，不用哈希。
+- 目录/符号链接的版本是弱版本（`stamp`）；复制/打包的目录一致性靠成员清单比对，不用哈希。R7 永久删除是例外：不建立目录成员快照，目录只绑定所选身份，单独选中文件/链接仍比对元数据。
 
 强版本要求出现在：`text save` 的 `expectedVersion`、`entries.rename` 的 `expectedVersion`、覆盖类 `expectedTargetVersion`、`io.openRead/removeEntry` 的内部证明、`maxVerificationBytes` 计费的核验操作。
 
@@ -197,8 +197,9 @@ errno 型错误的 `details` 只保留 `committed` / `cleanupFailed` / `stagingN
 - `toEntryStat`（`entries.stat`/新建目录/重命名结果）→ 上述 + `{ rootId, identity }`；文件额外含 `metadataVersion`、`sha256`、`version(强)`
 - `toTextSnapshot` → `{ rootId, path, text, bytes, version(强), encoding:'utf-8', bom, newline, mode }`
 - `toTextReceipt` = `toTextSnapshot` 去掉 `text`（可安全重放同一 requestId）
-- `toDeletePlan` → `{ id, targets[{rootId,path}], entryCount, expiresAt, permanent:true, entries[{rootId,path,kind,size,version}] }`（`identity`、`children` 不外泄）
-- `toDeleteCommitResult` → `{ id, status, results[{rootId,path,status,removed?,error?{code,message}}] }`
+- `toDeletePlan` → `{ id, scope:'selected-trees', targets[{rootId,path}], entryCount, expiresAt, permanent:true, entries[{rootId,path,kind,size,version}] }`。`entries` 与去重后的 `targets` 一一对应，`entryCount` 只统计所选目标，不枚举/统计后代；`identity`、`parentIdentity` 不外泄。目录确认绑定身份，包含执行时整个子树（含确认期间新增/修改），单独选中文件/链接仍绑定元数据版本。
+- `toDeleteCommitResult` → `{ id, status, results[{rootId,path,status,removed?,contentsChanged?,error?{code,message}}] }`。一条结果对应一个所选目标；`removed` 表示所选名字本身已移除，`contentsChanged` 表示其范围内确有条目被移除，不可把失败解释为整个目录未动。完整/部分回执均幂等重放。
+- **删除协议修订**：`delete.commit` 请求必须携带 `scope:'selected-trees'`；缺失或不匹配返回 `INVALID_REQUEST`/400，旧 Client 不能凭旧清单语义授权递归删除。新 Client 拒绝缺少 scope 或 entries/targets 覆盖不一致的计划。原路由、`requestId`、人工 `confirmed:true`、TTL 与其他操作契约不变。
 - `toPublicTask`（任务视图）
   - 保留：`id, operation, status, createdAt, updatedAt, dismissed, historyRevision, canDismiss, destination, conflict, progress{total,completed,failed,skipped,cancelled,bytes,totalBytes}, items[], cancelRequested?, persistenceError?`
   - 每项保留：`id, source{rootId,path,expectedVersion}, conflict, name?, expectedTargetVersion?, destination, status, attempts, bytesTransferred, result?{destination(摘要),bytes,sourceRemoved,method}, error?`
@@ -234,8 +235,8 @@ type DegradedView =
 - `total`：整个目录中**可寻址**条目数量（正常目录下等于全部子项）；
 - `nextCursor`：语义不变，仍在**完整 readdir 顺序（含不可寻址项）**上推进，因此游标稳定性与 `DIRECTORY_CHANGED` 判定不受影响；一页可寻址条目数可能少于 `limit`，这是允许的；
 - 枚举必须**逐项隔离**：单个不可寻址名称只让该项进入 `unaddressable`，不得使 `entries.list` 或整个目录枚举失败；
-- 目录复制、打包或删除遇到不可寻址条目时，该项明确失败并使用既有 `UNREPRESENTABLE_REFERENCE`/422（不新增错误码），其余项遵守 R8 部分成功语义；
-- 本版不为这些名称新增重命名、删除或引用能力；前端必须渲染 `name` 与 `reason`，且不得为它们伪造 path、不得提供进入/选中/引用/复制/移动/删除入口。
+- 目录复制、打包遇到不可寻址条目时，该项明确失败并使用既有 `UNREPRESENTABLE_REFERENCE`/422，其余项遵守 R8 部分成功语义；R7 整体删除一个可寻址目录时，后代按原始目录项名称移除，不再预扫描/拒绝或遗漏不可寻址的后代；
+- 不为这些名称新增单独重命名、删除或引用能力；前端必须渲染 `name` 与 `reason`，且不得为它们伪造 path、不得提供进入/选中/引用/复制/移动/删除入口。
 
 ### 版本字段的严格程度取决于「谁铸造」（判据）
 

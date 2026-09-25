@@ -224,16 +224,21 @@ export function Panel(props: PanelProps): ReactNode {
     }
   }
 
-  async function refreshDocuments(id: string): Promise<void> {
-    for (const document of documents.getSnapshot().documents.filter(item => item.rootId === id && !item.saving)) {
-      try {
-        const snapshot = await api.control({ op: 'text.read', rootId: document.rootId, path: document.path });
+  async function refreshDocuments(id: string, prefix = '', persistent = false): Promise<void> {
+    // A partial directory deletion only reconciles open documents, never walks
+    // the deleted subtree again. Confirmed effects also survive a panel remount.
+    for (const document of documents.getSnapshot().documents.filter(item => item.rootId === id && !item.saving
+      && (!prefix || item.path === prefix || item.path.startsWith(`${prefix}/`)))) {
+      const isCurrent = (): boolean => {
         const current = findDocument(document.id);
-        if (alive.current && current && !current.saving && current.rootId === document.rootId && current.path === document.path && current.base.version === document.base.version) {
-          documents.open(snapshot, { activate: false });
-        }
+        return Boolean(current && !current.saving && current.rootId === document.rootId && current.path === document.path
+          && current.attempt === document.attempt && current.base.version === document.base.version);
+      };
+      try {
+        const snapshot = await api.control({ op: 'text.read', rootId: document.rootId, path: document.path }, { persistent });
+        if ((alive.current || persistent) && isCurrent()) documents.open(snapshot, { activate: false });
       } catch (failure) {
-        if (isMissingFailure(failure)) documents.markMissing(document.rootId, document.path);
+        if (isMissingFailure(failure)) { if (isCurrent()) documents.markMissing(document.rootId, document.path); }
         else throw failure;
       }
     }
@@ -871,12 +876,19 @@ export function Panel(props: PanelProps): ReactNode {
     try {
       const plan = await api.control({ op: 'delete.prepare', items: attempt.targets }, { signal: attempt.controller.signal });
       if (!alive.current || !deleteAttempt.current.isCurrent(attempt) || attempt.controller.signal.aborted) return;
-      const validTargets = plan.targets.length > 0 && plan.targets.every(target => attempt.targets.some(selected => target.rootId === selected.rootId && target.path === selected.path));
-      const validEntries = plan.entries.length > 0 && plan.entries.length === plan.entryCount && plan.entries.every(entry =>
-        typeof entry.path === 'string' && typeof entry.version === 'string' && entry.version.length > 0 && ['file', 'directory', 'symlink'].includes(entry.kind)
-        && validTargets && plan.targets.some(target => entry.rootId === target.rootId && (entry.path === target.path || entry.path.startsWith(`${target.path}/`))));
-      if (typeof plan.id !== 'string' || !plan.id || plan.permanent !== true || !Number.isFinite(plan.expiresAt) || !validTargets || !validEntries) {
-        throw Object.assign(new Error('The server did not return a reviewable deletion manifest.'), { code: 'INVALID_DELETE_PLAN' });
+      const targetKeys = new Set((plan.targets ?? []).map(target => `${target.rootId}\0${target.path}`));
+      const validTargets = Array.isArray(plan.targets) && plan.targets.length > 0 && targetKeys.size === plan.targets.length
+        && plan.targets.every(target => attempt.targets.some(selected => target.rootId === selected.rootId && target.path === selected.path))
+        && attempt.targets.every(selected => plan.targets.some(target => target.rootId === selected.rootId
+          && (selected.path === target.path || selected.path.startsWith(`${target.path}/`))));
+      const validEntries = Array.isArray(plan.entries) && validTargets && plan.entries.length === plan.targets.length
+        && plan.entries.length === plan.entryCount
+        && new Set(plan.entries.map(entry => `${entry.rootId}\0${entry.path}`)).size === plan.entries.length
+        && plan.entries.every(entry => typeof entry.version === 'string' && entry.version.length > 0
+          && ['file', 'directory', 'symlink'].includes(entry.kind) && targetKeys.has(`${entry.rootId}\0${entry.path}`));
+      if (typeof plan.id !== 'string' || !plan.id || plan.scope !== 'selected-trees' || plan.permanent !== true
+        || !Number.isFinite(plan.expiresAt) || !validTargets || !validEntries) {
+        throw Object.assign(new Error('The server did not confirm the selected-tree deletion scope.'), { code: 'INVALID_DELETE_PLAN' });
       }
       publishDelete(attempt, { phase: 'ready', plan, acknowledged: false });
     } catch (failure) {
@@ -892,8 +904,15 @@ export function Panel(props: PanelProps): ReactNode {
     publishDelete(attempt, { phase: 'committing', acknowledged: false });
     void run(async () => {
       try {
-        const result = await api.control({ op: 'delete.commit', requestId: attempt.requestId, planId: plan.id, confirmed: true }, { persistent: true });
-        for (const item of result.results) if (item.status === 'completed' || item.removed) documents.markMissing(item.rootId, item.path);
+        const result = await api.control({ op: 'delete.commit', requestId: attempt.requestId, planId: plan.id, scope: plan.scope, confirmed: true }, { persistent: true });
+        fileGeneration.current += 1;
+        for (const item of result.results) {
+          if (item.status === 'completed' || item.removed) documents.markMissing(item.rootId, item.path);
+          else {
+            try { await refreshDocuments(item.rootId, item.path, true); }
+            catch (failure) { if (alive.current) setError(failure); }
+          }
+        }
         if (alive.current) {
           setOperationResult(result);
           if (deleteAttempt.current.isCurrent(attempt)) { deleteAttempt.current.clear(attempt); setDeleteDialog(null); }

@@ -187,7 +187,7 @@ test('G1: a directory with unexpressible names lists safely and per-item', { ski
   assert.equal(seen.size + unaddressableSeen.size, listing.value.total + listing.value.unaddressable.length);
 });
 
-test('G2: directory operations fail explicitly on an unexpressible member', { skip: blocked }, async t => {
+test('G2: copy and ZIP refuse an unexpressible member while the selected tree stays deletable whole', { skip: blocked }, async t => {
   const fixture = await hostFixture({ withTasks: true, withTransfers: true });
   t.after(fixture.close);
   await mkdir(path.join(fixture.directory, 'mixed'));
@@ -195,11 +195,16 @@ test('G2: directory operations fail explicitly on an unexpressible member', { sk
   writeFileSync(path.join(fixture.directory, 'mixed', UNEXPRESSIBLE[0]), 'special');
   await mkdir(path.join(fixture.directory, 'dest'));
 
+  // Deletion confirms the selected directory, not its members: the tree is
+  // addressable, so preparing it succeeds with one entry and touches nothing.
+  // Copy and ZIP still have to materialize every member, so they refuse.
   const prepared = await fixture.call('delete.prepare', { items: [fixture.ref('mixed')] });
   record(evidence, 'r18-operations', `delete.prepare -> ${prepared.status} ${prepared.error?.code}`);
-  assert.equal(prepared.status, 422, 'deleting a tree containing an unexpressible name must fail explicitly');
-  assert.equal(prepared.error.code, 'UNREPRESENTABLE_REFERENCE');
-  assert.equal(existsSync(path.join(fixture.directory, 'mixed', 'ok.txt')), true, 'a refused deletion must not remove anything');
+  assert.equal(prepared.status, 200, `deleting a whole directory must not depend on naming its members: ${JSON.stringify(prepared.error)}`);
+  assert.equal(prepared.value.entryCount, 1, 'the manifest lists the selected directory and none of its members');
+  assert.equal(prepared.value.entries[0].path, 'mixed');
+  assert.equal(existsSync(path.join(fixture.directory, 'mixed', 'ok.txt')), true, 'preparing a deletion must not remove anything');
+  assert.equal(existsSync(path.join(fixture.directory, 'mixed', UNEXPRESSIBLE[0])), true, 'preparing a deletion must not touch the unexpressible member');
 
   const copied = await fixture.call('tasks.start', {
     operation: 'copy', items: [{ ...fixture.ref('mixed'), expectedVersion: '1:2:3:4:5' }], destination: fixture.ref('dest'), conflict: 'skip',
@@ -221,6 +226,17 @@ test('G2: directory operations fail explicitly on an unexpressible member', { sk
     record(evidence, 'r18-operations', `zip download planning -> ${download.status} ${download.error?.code}`);
     assert.equal(download.error.code, 'UNREPRESENTABLE_REFERENCE');
   }
+
+  // Only now, with the copy and ZIP answers recorded against a source that still
+  // exists, is the prepared confirmation committed: the whole directory goes,
+  // the member the grammar cannot name included.
+  const committed = await fixture.call('delete.commit', {
+    scope: prepared.value.scope, planId: prepared.value.id, confirmed: true,
+  });
+  record(evidence, 'r18-operations', `delete.commit -> ${committed.status} ${committed.error?.code}`);
+  assert.equal(committed.status, 200, `the confirmed whole-directory deletion must be accepted: ${JSON.stringify(committed.error)}`);
+  assert.equal(committed.value.status, 'completed', JSON.stringify(committed.value.results));
+  assert.equal(existsSync(path.join(fixture.directory, 'mixed')), false, 'the whole selected directory, unexpressible member included, must be removed');
 });
 
 test('G3: deep nesting stays addressable and never degrades into a 500', { skip: blocked }, async t => {

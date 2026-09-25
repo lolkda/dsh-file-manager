@@ -149,10 +149,13 @@ export const DIRECTORY_PAGE_MAX = 500;
 /** Root-relative path grammar bound, measured in UTF-16 code units. */
 export const RELATIVE_PATH_MAX_LENGTH = 4096;
 
-/** Deletion confirmation bounds: selected entries, manifest entries, live plans. */
+/** Deletion binds selected trees, not snapshots of every descendant. */
+export const DELETE_SCOPE = 'selected-trees' as const;
+/** Bounds apply to selections/live plans, never the number of descendants. */
 export const DELETE_PLAN_MAX_SELECTIONS = 10000;
-export const DELETE_PLAN_MAX_ENTRIES = 10000;
 export const DELETE_PLAN_MAX_PENDING = 64;
+/** Leaf filesystem operations; directory traversal itself stays serial. */
+export const DELETE_IO_CONCURRENCY = 8;
 
 /** Task-history close bounds: records per request and distinct-select duplicate check. */
 export const ACTIVITY_DISMISS_MAX_ITEMS = 256;

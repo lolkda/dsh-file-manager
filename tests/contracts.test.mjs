@@ -273,7 +273,7 @@ const validRequests = {
   'entries.create-directory': { op: 'entries.create-directory', rootId: 'root-1', path: 'new-dir', requestId: 'create-dir-request' },
   'entries.rename': { op: 'entries.rename', rootId: 'root-1', path: 'old.txt', name: 'new.txt', expectedVersion: WEAK, requestId: 'rename-request' },
   'delete.prepare': { op: 'delete.prepare', items: [{ rootId: 'root-1', path: 'file.txt' }] },
-  'delete.commit': { op: 'delete.commit', planId: 'plan-1', confirmed: true, requestId: 'delete-commit-request' },
+  'delete.commit': { op: 'delete.commit', scope: 'selected-trees', planId: 'plan-1', confirmed: true, requestId: 'delete-commit-request' },
   'activities.dismiss': {
     op: 'activities.dismiss', requestId: 'dismiss-request',
     items: [{ kind: 'transfer', taskId: 'task-1', expectedHistoryRevision: 0 }],
@@ -835,13 +835,13 @@ test('root, listing, stat and text views expose their documented fields only', (
 
 test('the deletion plan and its outcome keep only the documented fields', () => {
   const plan = views.toDeletePlan({
-    id: 'plan-1', targets: [{ rootId: 'root-1', path: 'tree', extra: true }], entryCount: 2,
+    id: 'plan-1', scope: 'selected-trees', targets: [{ rootId: 'root-1', path: 'tree', extra: true }], entryCount: 1,
     expiresAt: 1700000000000, permanent: true,
     entries: [{ rootId: 'root-1', path: 'tree', kind: 'directory', size: 0, version: WEAK, identity: '1:2', children: ['a'] }],
     promise: null, result: null,
   });
   assert.deepEqual(plan, {
-    id: 'plan-1', targets: [{ rootId: 'root-1', path: 'tree' }], entryCount: 2, expiresAt: 1700000000000,
+    id: 'plan-1', scope: 'selected-trees', targets: [{ rootId: 'root-1', path: 'tree' }], entryCount: 1, expiresAt: 1700000000000,
     permanent: true, entries: [{ rootId: 'root-1', path: 'tree', kind: 'directory', size: 0, version: WEAK }],
   });
   const outcome = views.toDeleteCommitResult({
