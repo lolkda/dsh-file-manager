@@ -671,47 +671,59 @@ export function Panel(props: PanelProps): ReactNode {
     if (!source || source.working) return;
     const upload = source;
     upload.working = true;
-    const abort = (): void => upload.controller.abort();
+    // This attempt owns both body requests and the final receipt refresh. A
+    // cancelled refresh must not keep local workers busy or publish a late view.
+    const controller = upload.controller;
+    const stopped = (): boolean => upload.cancelled || controller.signal.aborted;
+    const abort = (): void => controller.abort();
     runtime.controller.signal.addEventListener('abort', abort, { once: true });
     if (runtime.controller.signal.aborted) abort();
     const getTask = () => activity.getSnapshot().transfers.find(task => task.id === taskId) as unknown as { items: { id: string; path: string; kind: string; status: string }[] } | undefined;
     async function sendItem(item: { id: string; path: string; kind: string }): Promise<void> {
-      if (upload.cancelled || getTask()?.items.find(value => value.id === item.id)?.status !== 'pending') return;
+      if (stopped() || getTask()?.items.find(value => value.id === item.id)?.status !== 'pending') return;
       try {
         const file = upload.files.get(item.path);
         if (item.kind === 'file' && !file) throw Object.assign(new Error('The selected browser file is unavailable.'), { code: 'UPLOAD_SOURCE_LOST' });
         const response = await fetch(api.uploadUrl(taskId, item.id), {
           method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/octet-stream' },
-          ...(item.kind === 'file' && file ? { body: file } : {}), signal: upload.controller.signal,
+          ...(item.kind === 'file' && file ? { body: file } : {}), signal: controller.signal,
         });
         const result = await response.json() as { ok: boolean; value?: unknown; error?: { code?: string; message?: string } };
+        if (stopped()) return;
         if (result.value) activity.put('transfers', result.value as never);
         if (!result.ok) throw Object.assign(new Error(result.error?.message ?? 'Upload failed.'), result.error ?? {});
       } catch (failure) {
         const code = typeof failure === 'object' && failure !== null ? (failure as { code?: unknown }).code : undefined;
-        if (!upload.cancelled && alive.current) setError(typeof code === 'string' ? failure : Object.assign(new Error('Upload connection failed.'), { code: 'TRANSPORT' }));
+        if (!stopped() && alive.current) setError(typeof code === 'string' ? failure : Object.assign(new Error('Upload connection failed.'), { code: 'TRANSPORT' }));
       }
     }
     try {
       const task = getTask();
       if (!task) return;
-      for (const item of task.items.filter(value => value.kind === 'directory')) { if (upload.cancelled) break; await sendItem(item); }
+      for (const item of task.items.filter(value => value.kind === 'directory')) { if (stopped()) break; await sendItem(item); }
       const files = task.items.filter(value => value.kind === 'file');
       let index = 0;
       await Promise.all(Array.from({ length: Math.min(limits.transferConcurrency ?? 2, files.length) }, async () => {
-        while (!upload.cancelled && index < files.length) await sendItem(files[index++]!);
+        while (!stopped() && index < files.length) await sendItem(files[index++]!);
       }));
-      const latest = await api.control({ op: 'transfers.get', taskId }, { persistent: true });
+      if (stopped()) return;
+      const latest = await api.control({ op: 'transfers.get', taskId }, { signal: controller.signal });
+      if (stopped()) return;
       activity.put('transfers', latest as never);
       for (const item of latest.items) if (item.committed || item.status === 'skipped') upload.files.delete(item.path);
-      if (alive.current && rootId) await listAt(rootId, directory);
     } catch (failure) {
-      if (!upload.cancelled && alive.current) setError(failure);
+      if (!stopped() && alive.current) setError(failure);
     } finally {
       upload.working = false;
       runtime.controller.signal.removeEventListener('abort', abort);
       const latest = getTask();
       if (latest) activity.put('transfers', latest as never);
+    }
+    // Directory browsing is not upload work: a slow listing must not prevent
+    // cancellation/retry of an otherwise settled transfer.
+    if (!stopped() && alive.current && rootId) {
+      try { await listAt(rootId, directory); }
+      catch (failure) { if (!stopped() && alive.current) setError(failure); }
     }
   }
 

@@ -46,28 +46,22 @@ jobs:
           grep -q "__ModuleLoader__.load({" dist/client.js || { echo "::error::dist/client.js is not a ModuleLoader module"; exit 1; }
           grep -q "id: \"$name\"" dist/client.js || { echo "::error::dist/client.js does not register $name"; exit 1; }
 
-      # Two suites drive a real deployed DSH. Install one so they execute here
-      # rather than reporting the skip they use on a machine that has none. The
-      # version is the one this release is adapted to: the 0.1.7-rc.1 settings
-      # surface is what `tests/host-config.test.mjs` proves, so an older runtime
-      # would either skip that evidence or make it meaningless.
+      # A fixed test runtime makes CI reproducible; it is NOT an installation
+      # constraint. Exercise the real Config, HTTP, storage and compatibility gate.
       - name: Install the DSH runtime the integration suites resolve
         env:
-          DSH_RUNTIME_VERSION: 0.1.7-rc.1
+          DSH_RUNTIME_VERSION: 0.2.0-rc.2
         run: |
           npm install --global "@deepseek-ai/dsh@${DSH_RUNTIME_VERSION}"
           root="$(npm root -g)/@deepseek-ai/dsh"
           echo "FILE_MANAGER_DSH_RUNTIME_ROOT=${root}" >> "$GITHUB_ENV"
-          # The 0.1.7-specific evidence case reads its own variable and skips when it
-          # is unset, so both names have to point at this installation.
-          echo "FILE_MANAGER_DSH_017_RUNTIME_ROOT=${root}" >> "$GITHUB_ENV"
 
       # Without this, a failed or misplaced install would let those suites skip
       # silently and still leave the build green.
       - name: Assert the integration suites can resolve the DSH runtime
         run: |
           set -euo pipefail
-          for variable in FILE_MANAGER_DSH_RUNTIME_ROOT FILE_MANAGER_DSH_017_RUNTIME_ROOT; do
+          for variable in FILE_MANAGER_DSH_RUNTIME_ROOT; do
             test -f "${!variable}/package.json" || {
               echo "::error::no DSH runtime at ${!variable} (${variable}); the integration suites would skip instead of running"
               exit 1

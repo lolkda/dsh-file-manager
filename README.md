@@ -4,7 +4,7 @@
 
 ## 当前版本与验证状态
 
-当前适配版为 **0.5.0**，面向 DSH **0.1.7-rc.1**。本代次将永久删除改为“所选目录整体删除”：准备不再扫描后代或受子树 10,000 条目上限限制，确认期间新增或修改的目录内容也在删除范围内；Client/Host 通过 `scope: 'selected-trees'` 同步确认语义，其余保存、覆盖和传输强校验不变。0.4.0 的主题上传确认与 0.3.0 的内联语法高亮继续保留。**发布与安装状态不在仓库内声明**——本仓库不记录 registry 发布结果，也不记录安装到某个 DSH 实例的结果，公开状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager) 为准。开发期验证记录：类型检查、构建与 **728 项回归（0 失败 0 跳过）**，另含真实多小文件目录删除、竞态与部分失败验收；真实完整页面的键盘/输入法与像素滚动仍未验收。下方保留旧版本验证记录。
+当前源码版本为 **0.5.2**。DSH 使用 optional peer **`*`**，不再指定或锁定适配版本；当前集成验证基线是 **DSH 0.2.0-rc.2**，不是安装限制，也不代表保证兼容所有未来 API。本次同时包含新版 DSH 加载准入调整，以及上传/下载共享 I/O 调度死锁、取消状态刷新和备用目录选择器修复。继续保留 0.5.0 的“所选目录整体删除”：准备不再扫描后代或受子树 10,000 条目上限限制，确认期间新增或修改的目录内容也在删除范围内；Client/Host 通过 `scope: 'selected-trees'` 同步确认语义，其余保存、覆盖和传输强校验不变。0.4.0 的主题上传确认与 0.3.0 的内联语法高亮继续保留。**发布与安装状态不在仓库内声明**——本仓库不记录 registry 发布结果，也不记录安装到某个 DSH 实例的结果，公开状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager) 为准。本次开发验证：在真实 **DSH 0.2.0-rc.2** 下类型检查、构建与 **742 项回归（0 失败 0 跳过）** 通过，另验证真实 Cordis/SlotCore 的 Client 注册和卸载。未自动安装到当前 GUI；完整页面验收不能由测试或构建结果替代。下方保留旧版本验证记录。
 
 - GitHub 基线版本：**0.2.8**（TypeScript 结构性重构代次）。本代次在**独立副本** `dsh-file-manager-ts/` 中进行：原始项目 `dsh-file-manager/` 全程只读，不在其中运行测试、构建或修改文件。0.2.8 发布前已重新通过 `npm run check`（类型检查、构建与产物语法检查）、`npm run build:native` 与全量 **518 项测试（0 失败、0 跳过）**；公开发布状态以 [npm registry](https://www.npmjs.com/package/@lolkda/dsh-file-manager/v/0.2.8) 为准。
 - 重构前的副本基线（改动前实测）：`npm test` **329/329 通过、0 跳过**，`npm run check` 与 `npm run build:native` 通过。该基线是本次重构的等价性红线。
@@ -18,7 +18,22 @@
 - 0.1.1 的解包快照及实际安装目录均以 `agent (1000:1000)` 在新 Node 进程中通过 4 项真实后端回归。安装快照：`artifacts/local-dsh-file-manager-0.1.1.tgz`，SHA-256：`9a1aa07df33282ea0a137876c162aad0ce2ca9957e629acb5caaacdf5284627f`。
 - 以上 `artifacts/**/*.tgz` 与 `artifacts/ts-refactor/` 下的日志均为**本机历史快照与证据文件**（`artifacts/` 已被 `.gitignore` 忽略），仓库与 npm 包内**不提供下载**；需要复核时在本机用 `npm pack` 与对应测试重新生成。
 
-### DSH 0.1.7-rc.1 兼容修复
+### 0.5.2：传输死锁与目录上传修复
+
+- 上传、下载规划和流式下载复用共享 I/O 并发名额，避免嵌套申请导致挂起及阻塞后续永久删除；ZIP 延迟读取保留调度上下文，读取失败时释放名额。
+- 取消上传会中止最终状态查询，忽略已取消请求的迟到响应，并及时释放本地任务状态以允许重试。
+- 备用目录选择器补上 `webkitdirectory`，保留含文件的嵌套目录；空目录仍需支持 `showDirectoryPicker` 的浏览器。
+- 增加共享调度、取消/重试、删除与嵌套目录上传回归测试。更新安装后需重新加载插件并刷新页面，构建本身不会更新运行中的副本。
+
+### 0.5.1：取消 DSH 版本锁定
+
+- `peerDependencies["@deepseek-ai/dsh"]` 从精确的 `0.1.7-rc.1` 改为 `*`，保留 optional，不会把 DSH CLI 作为本插件依赖安装，也不需要 `dsh plugin allow-version`。
+- 新版 DSH 即使对 optional peer 也执行兼容性检查；真实 0.2.0-rc.2 检查器已复现旧声明被拒绝，并确认新声明在无豁免时通过。测试中的其他版本数字只验证准入规则，不宣称相应运行时 API 已验收。
+- 所有真实运行时测试统一读取 `FILE_MANAGER_DSH_RUNTIME_ROOT`，修复配置测试专门寻找旧版路径而跳过新版的问题。CI/发布门禁使用 0.2.0-rc.2 作为可复现的测试基线，不限制用户安装时的 DSH 版本。
+- 此次检查未发现需要修改现有 Host 文件操作实现的接口差异。鉴权、授权根、Config、存储单元和数据格式保持不变；已通过完整 HTTP/存储/组件测试及真实 Client slot 注册/卸载冒烟，未执行当前 GUI 的安装、重启或完整浏览器操作验收。
+- 升级需要安装重新构建的 **0.5.1** 包，再重启 DSH 并刷新页面。旧的已安装 0.5.0 副本不会因工作区源码变化而自动解除限制。其他插件的版本错误不属于本包，仍需分别处理。
+
+### DSH 0.1.7-rc.1 兼容修复（历史记录）
 
 - 新版 DSH 不再提供 `SettingsProvider.register/get`。资源限制改由插件导出的 `Config` schema 校验，并通过 `local-file-manager` bundle entry 的 `config:` 传入；不配置时保留全部原默认值。
 - 修复旧版初始化异常被降级路径捕获、导致面板看似加载但文件功能不可用的问题。根授权、任务日志的存储单元和数据格式不变，Client 的面包屑与文件操作逻辑不变。
@@ -148,7 +163,7 @@ npm test             # 测试从 dist/ 导入被测实现
 
 `build:native` 使用系统 `cc` 显式编译。不要在助手缺失、不匹配或不支持时以普通 rename 代替。
 
-`tests/runtime-storage.test.mjs` 与 `tests/download-navigation.test.mjs` 针对**真实部署的 DSH**运行，默认从 `/usr/local/lib/node_modules/@deepseek-ai/dsh` 解析，可用 `FILE_MANAGER_DSH_RUNTIME_ROOT` 指向别的安装。找不到运行时时它们会**明确跳过并打印原因**，不再让整个文件在导入期崩溃；CI 会安装 `@deepseek-ai/dsh@0.1.6-alpha.2` 并断言其可解析，因此 runner 上跑的是完整覆盖而不是静默跳过。
+HTTP、Storage、Config 与版本准入测试针对**真实部署的 DSH**运行，统一默认从 `/usr/local/lib/node_modules/@deepseek-ai/dsh` 解析，可用 `FILE_MANAGER_DSH_RUNTIME_ROOT` 指向别的安装，不再需要旧的 `FILE_MANAGER_DSH_017_RUNTIME_ROOT`。找不到运行时时会**明确跳过并打印原因**；CI/发布门禁安装 `@deepseek-ai/dsh@0.2.0-rc.2` 并断言可解析。版本准入集成测试依赖新版的 `evaluatePluginCompatibility`，不能用不提供该检查器的旧运行时替代本次验证基线。
 
 ## 安装与升级
 

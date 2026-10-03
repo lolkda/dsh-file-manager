@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { FileManagerError, fail } from '../contracts/errors.js';
 import { LIMIT_DEFAULTS } from '../contracts/limits.js';
 import { renameNoReplace } from './atomic-rename.js';
-import type { HeavyIoScheduler } from './scheduler.js';
+import type { HeavyIoPermit, HeavyIoScheduler } from './scheduler.js';
 
 const DIRECTORY_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -315,6 +315,7 @@ export function createIO<Root>(dependencies: IODependencies<Root>) {
     if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) fail('INVALID_REQUEST', 'A raw read bound must be a nonnegative safe integer.');
     const location = await acquireParent({ rootId, path: relativePath, signal });
     let handle: FileHandle | undefined;
+    let permit: HeavyIoPermit | undefined;
     try {
       const named = await fs.lstat(location.address, { bigint: true });
       if (!named.isFile()) fail('UNSUPPORTED_ENTRY', 'Only ordinary files can be streamed; links are not followed.', 422);
@@ -328,7 +329,7 @@ export function createIO<Root>(dependencies: IODependencies<Root>) {
         fail('TOO_LARGE', 'The file exceeds the content-verification budget for this operation; content hashing was not started.', 413);
       }
       // The permit covers the whole read, including streaming the caller does later.
-      const permit = scheduler ? await scheduler.acquire(signal ? { signal } : undefined) : undefined;
+      permit = scheduler ? await scheduler.acquire(signal ? { signal } : undefined) : undefined;
       const size = Number(before.size);
       chargeVerification(spend, size);
       async function verifyNamed(): Promise<void> {
@@ -368,9 +369,11 @@ export function createIO<Root>(dependencies: IODependencies<Root>) {
           source.stream.destroy();
           await reading?.catch(() => {});
           await checking?.catch(() => {});
-          await handle?.close();
-          permit?.release();
-          await location.parent.close();
+          try { await handle?.close(); }
+          finally {
+            try { await location.parent.close(); }
+            finally { permit?.release(); }
+          }
         },
       };
       source.stream = Readable.from((async function* () {
@@ -397,8 +400,11 @@ export function createIO<Root>(dependencies: IODependencies<Root>) {
       resources.add(source.close);
       return source;
     } catch (error) {
-      if (handle) await handle.close();
-      await location.parent.close();
+      try { await handle?.close(); }
+      finally {
+        try { await location.parent.close(); }
+        finally { permit?.release(); }
+      }
       if ((error as NodeJS.ErrnoException).code === 'ELOOP') fail('UNSUPPORTED_ENTRY', 'Symbolic links are not followed.', 422);
       throw error;
     }

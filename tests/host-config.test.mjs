@@ -1,5 +1,5 @@
 /**
- * Host configuration boundary against DSH 0.1.7-rc.1.
+ * Host Config boundary introduced in DSH 0.1.7, tested on the deployed runtime.
  *
  * DSH 0.1.6-alpha.2 exposed `ctx.settings` as a `SettingsProvider`: a plugin
  * called `settings.register(namespace, schema, options)` and read the resolved
@@ -28,12 +28,11 @@ import { LIMIT_DEFAULTS, LIMIT_NAMES, SETTINGS_NAMESPACE } from '../dist/contrac
 const base = new URL('../', import.meta.url);
 const plugin = () => import('../dist/index.js');
 
-// The runtime under evidence. Deliberately NOT the variable runtime-storage.test.mjs
-// uses for "the deployed runtime": this suite is about 0.1.7-rc.1 specifically, and
-// pointing it at an older installation would make the evidence meaningless.
-const runtimeRoot = process.env.FILE_MANAGER_DSH_017_RUNTIME_ROOT ?? '/usr/local/dsh-0.1.7-rc.1/lib/node_modules/@deepseek-ai/dsh';
+// Test the installed runtime, just like the HTTP and storage suites. The Config
+// contract introduced in 0.1.7 must also be exercised on newer DSH releases.
+const runtimeRoot = process.env.FILE_MANAGER_DSH_RUNTIME_ROOT ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh';
 const runtimeAvailable = existsSync(path.join(runtimeRoot, 'package.json'));
-const skipWithoutRuntime = runtimeAvailable ? false : `no DSH runtime at ${runtimeRoot}; set FILE_MANAGER_DSH_017_RUNTIME_ROOT to run the deployment evidence case`;
+const skipWithoutRuntime = runtimeAvailable ? false : `no DSH runtime at ${runtimeRoot}; set FILE_MANAGER_DSH_RUNTIME_ROOT to run the deployment evidence case`;
 
 /**
  * A `ctx.settings` shaped exactly like DSH 0.1.7-rc.1's `SettingsForms`: forms
@@ -184,10 +183,8 @@ test('the config section identity is the bundle row id', async () => {
   assert.equal(id, SETTINGS_NAMESPACE, 'the config form is keyed by the profile entry id');
 });
 
-test('the deployed 0.1.7-rc.1 settings service really has no register or get', { skip: skipWithoutRuntime }, async () => {
+test('the deployed settings service uses Config forms rather than namespace register/get', { skip: skipWithoutRuntime }, async () => {
   const runtimeRequire = createRequire(path.join(runtimeRoot, 'package.json'));
-  const version = JSON.parse(await readFile(path.join(runtimeRoot, 'package.json'), 'utf8')).version;
-  assert.match(version, /^0\.1\.7-rc\.1$/, 'this evidence case is only meaningful against the targeted release');
   const real = await import(pathToFileURL(runtimeRequire.resolve('@deepseek-ai/dsh-settings')).href);
   const SettingsForms = real.SettingsForms ?? real.default;
   const service = Object.create(SettingsForms.prototype);

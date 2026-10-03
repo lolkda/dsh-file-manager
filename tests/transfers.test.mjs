@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createManager } from '../dist/host/manager.js';
+import { createHeavyIoScheduler } from '../dist/host/scheduler.js';
 
 const implementation = await import('../dist/host/transfers.js').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND' && error.message.includes('/host/transfers.js')) return {};
@@ -15,7 +16,7 @@ async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-transfer-'));
   const root = path.join(base, 'root');
   await mkdir(root);
-  const manager = createManager();
+  const manager = createManager({ scheduler: options.scheduler });
   let service;
   t.after(async () => { await service?.close(); await manager.close(); await rm(base, { recursive: true, force: true }); });
   const grant = await manager.addRoot({ path: root });
@@ -226,7 +227,8 @@ test('actual byte limits and truncated bodies fail without a destination or stag
 test('cancelling a blocked upload releases its reader and cleans only uncommitted staging', { timeout: 5000 }, async t => {
   const started = deferred();
   let readerCancelled = false;
-  const { service, grant, root } = await fixture(t, { onProgress: task => { if (task.bytesTransferred > 4) started.resolve(); } });
+  const scheduler = createHeavyIoScheduler({ concurrency: 1 });
+  const { service, grant, root } = await fixture(t, { scheduler, onProgress: task => { if (task.bytesTransferred > 4) started.resolve(); } });
   assert.equal(typeof service.handleUpload, 'function');
   const task = await service.begin(uploadInput(grant, [{ path: 'good', kind: 'file', size: 4 }, { path: 'partial', kind: 'file', size: 4 }]));
   await service.handleUpload(uploadRequest(task, task.items[0], 'done'));
@@ -241,6 +243,9 @@ test('cancelling a blocked upload releases its reader and cleans only uncommitte
   assert.equal(cancelled.items[0].status, 'completed');
   assert.equal(cancelled.items[0].committed, true);
   assert.equal(cancelled.items[1].committed, false);
+  assert.equal(cancelled.items[1].status, 'cancelled');
+  assert.equal(scheduler.status().active, 0);
+  assert.equal(scheduler.status().queued, 0);
   assert.equal(readerCancelled, true);
   assert.deepEqual(await readdir(root), ['good']);
 });
@@ -279,7 +284,7 @@ test('ENOSPC after a real staging write fails and cleans the uncommitted file', 
 test('default concurrency admits only two active uploads and cancellation drains queued work', { timeout: 5000 }, async t => {
   const two = deferred();
   let maximum = 0;
-  const { service, grant, root } = await fixture(t, { onProgress: task => {
+  const { service, grant, root } = await fixture(t, { scheduler: createHeavyIoScheduler(), onProgress: task => {
     const count = task.items.filter(item => item.status === 'running').length;
     maximum = Math.max(maximum, count); if (count === 2) two.resolve();
   } });
@@ -582,3 +587,26 @@ test('strong fingerprint planning shares the configured two-transfer concurrency
   } finally { gate.resolve(); await Promise.all(planning); }
   assert.equal(active, 0);
 });
+
+// Production shares the scheduler with manager IO; private schedulers in unit
+// fixtures used to hide publication waiting forever behind its own upload.
+for (const concurrency of [1, 2]) {
+  test(`shared IO budget completes ${concurrency} concurrent uploads and releases mutations`, { timeout: 5000 }, async t => {
+    const scheduler = createHeavyIoScheduler({ concurrency });
+    const { service, grant, root, manager } = await fixture(t, { scheduler });
+    await manager.createDirectory({ rootId: grant.id, path: 'empty' });
+    const task = await service.begin({ direction: 'upload', rootId: grant.id, path: 'empty',
+      items: Array.from({ length: concurrency }, (_, i) => ({ path: `file-${i}`, kind: 'file', size: 4 })),
+    });
+    const results = await Promise.all(task.items.map(item => service.handleUpload(uploadRequest(task, item, 'data'))));
+    for (const result of results) assert.equal(result.status, 200);
+    assert.equal(service.get(task.id).status, 'completed');
+    assert.equal(scheduler.status().active, 0);
+    assert.equal(scheduler.status().queued, 0);
+    assert.deepEqual((await readdir(path.join(root, 'empty'))).sort(), task.items.map(item => item.path).sort());
+    const selected = await manager.io.stat({ rootId: grant.id, path: 'empty/file-0' });
+    const plan = await manager.prepareDelete({ items: [{ rootId: grant.id, path: 'empty/file-0', expectedVersion: selected.version }] });
+    await manager.commitDelete({ planId: plan.id, confirmed: true });
+    assert.equal((await readdir(path.join(root, 'empty'))).includes('file-0'), false);
+  });
+}

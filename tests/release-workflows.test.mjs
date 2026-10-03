@@ -29,8 +29,8 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const at = relative => path.join(root, relative);
 const manifest = JSON.parse(readFileSync(at('package.json'), 'utf8'));
 
-/** The DSH version this release is adapted to; see R21 and `tests/host-config.test.mjs`. */
-const TARGET_DSH_VERSION = '0.1.7-rc.1';
+/** Reproducible integration-test runtime, not a restriction on plugin installation. */
+const TARGET_DSH_VERSION = '0.2.0-rc.2';
 
 /**
  * Floors for npm trusted publishing, from npm's own documentation

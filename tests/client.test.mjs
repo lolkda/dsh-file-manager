@@ -566,6 +566,27 @@ test('directory picker uploads nested files and explicitly empty directories', a
   assert.equal(view.transfers.list()[0].items.some(item => item.path === '项目/空目录' && item.status === 'completed'), true);
 });
 
+test('fallback directory picker selects a directory tree and retains nested relative paths', async t => {
+  const view = await setup(t, { transfers: true });
+  await view.click({ 'data-fm-action': 'upload-directory' });
+  const input = node(view.renderer, { 'data-fm-upload-directory-input': true });
+  assert.equal(input.props.webkitdirectory, '', 'fallback must be a native directory picker, not a multi-file picker');
+  assert.equal(node(view.renderer, { 'data-fm-upload-files': true }).props.webkitdirectory, undefined);
+  assert.match(textOf(view.renderer.root), /无法识别空目录/);
+  const files = ['项目/readme.txt', '项目/子目录/深层/资料.txt'].map((relative, index) => {
+    const file = new File([`content-${index}`], relative.split('/').at(-1));
+    Object.defineProperty(file, 'webkitRelativePath', { value: relative });
+    return file;
+  });
+  await act(async () => { await input.props.onChange({ target: { files, value: 'chosen' } }); });
+  await view.flush();
+  await view.click({ 'data-fm-action': 'upload-confirm' });
+  assert.equal(await readFile(path.join(view.root, '项目/readme.txt'), 'utf8'), 'content-0');
+  assert.equal(await readFile(path.join(view.root, '项目/子目录/深层/资料.txt'), 'utf8'), 'content-1');
+  assert.equal((await stat(path.join(view.root, '项目/子目录/深层'))).isDirectory(), true);
+  assert.equal(view.transfers.list()[0].status, 'completed');
+});
+
 test('upload overwrite checks the reviewed target version before publishing', async t => {
   const view = await setup(t, { transfers: true, seed: root => writeFile(path.join(root, 'upload.txt'), 'original') });
   await act(async () => { await node(view.renderer, { 'data-fm-upload-files': true }).props.onChange({ target: { files: [new File(['incoming'], 'upload.txt')], value: '' } }); });

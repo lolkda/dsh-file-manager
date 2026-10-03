@@ -39,7 +39,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { act, node, nodes, setup, textOf, uiBoundary } from './client-harness.mjs';
@@ -545,4 +545,94 @@ test('dismissing the upload policy list keeps the review and its policy', async 
   assert.equal(policyMenu(view).props.selectedId, 'error');
   assert.ok(uploadDialog(view), 'dismissing the popup must not close the upload review');
   assert.deepEqual(beginRequests(view), []);
+});
+
+
+// ---------------------------------------------------------------------------
+// Cancellation owns the entire upload attempt, not only its body POSTs.
+// The interceptors below model stalled/failed fetches only; cancellation and
+// retry receipts, final file contents and rendered cards come from the Host.
+// ---------------------------------------------------------------------------
+
+const transferCards = view => nodes(view.renderer, { className: 'fm-notice' }).filter(item => item.props['data-fm-transfer-id']);
+const transferAction = (view, action) => node(view.renderer, { 'data-fm-transfer-action': action });
+const controlOperation = init => init.headers?.['content-type'] === 'application/json' ? JSON.parse(init.body).op : null;
+
+// Removing cancellation checks from the worker loop starts the queued file;
+// leaving the final reconciliation alive issues another request after abort.
+// The retained File sources must still support a real retry after cancellation.
+test('upload cancellation aborts active bodies, stops queued files and retains sources for retry', async t => {
+  let holdBodies = true;
+  const bodies = [];
+  const view = await setup(t, {
+    transfers: true, limits: { transferConcurrency: 2 },
+    intercept(url, init, route) {
+      if (String(url).startsWith('/api/file-manager/v2/upload?') && holdBodies) {
+        return new Promise((resolve, reject) => {
+          bodies.push(init.signal);
+          init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        });
+      }
+      return route(url, init);
+    },
+  });
+  const files = ['one.txt', 'two.txt', 'queued.txt'].map(name => new File([name], name));
+  await openUpload(view, files);
+  await act(async () => { node(view.renderer, { 'data-fm-action': 'upload-confirm' }).props.onClick(); });
+  assert.equal(await view.waitFor(() => bodies.length === 2), true, 'both upload slots must be occupied before cancelling');
+  await view.click({ 'data-fm-transfer-action': 'cancel' });
+  assert.equal(bodies.length, 2, 'the third file must remain queued in the browser');
+  assert.ok(bodies.every(signal => signal.aborted), 'cancel must release every active body fetch');
+  assert.equal(transferCards(view)[0].props['data-fm-transfer-status'], 'cancelled');
+  assert.equal(transferAction(view, 'retry').props.disabled, false);
+  assert.equal(view.requests.filter(request => controlOperation(request.init) === 'transfers.get').length, 0,
+    'the cancellation receipt owns reconciliation; stopped workers must not fetch a stale receipt');
+  assert.equal(nodes(view.renderer, { role: 'alert' }).length, 0, 'intentional aborts are not upload failures');
+
+  holdBodies = false;
+  await view.click({ 'data-fm-transfer-action': 'retry' });
+  assert.equal(transferCards(view)[0].props['data-fm-transfer-status'], 'completed');
+  for (const file of files) assert.equal(await readFile(path.join(view.root, file.name), 'utf8'), file.name);
+});
+
+// A body transport error leaves the Host's item pending. Previously the final
+// transfers.get used the plugin-lifetime signal, so cancelling could finish on
+// the Host while local working stayed true and the Retry button stayed disabled.
+test('upload cancellation aborts a stalled final receipt refresh and unblocks retry', async t => {
+  let failBody = true;
+  let heldReceipt;
+  const view = await setup(t, {
+    transfers: true,
+    async intercept(url, init, route) {
+      if (String(url).startsWith('/api/file-manager/v2/upload?') && failBody) {
+        failBody = false;
+        throw new TypeError('Simulated upload connection loss');
+      }
+      if (controlOperation(init) === 'transfers.get' && !heldReceipt) {
+        const response = await route(url, init);
+        return new Promise((resolve, reject) => {
+          heldReceipt = { signal: init.signal, release: () => resolve(response) };
+          init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        });
+      }
+      return route(url, init);
+    },
+  });
+  try {
+    await openUpload(view, [new File(['recovered upload'], 'retry.txt')]);
+    await act(async () => { node(view.renderer, { 'data-fm-action': 'upload-confirm' }).props.onClick(); });
+    assert.equal(await view.waitFor(() => Boolean(heldReceipt)), true);
+    await act(async () => { transferAction(view, 'cancel').props.onClick(); });
+    assert.equal(await view.waitFor(() => transferCards(view)[0]?.props['data-fm-transfer-status'] === 'cancelled'), true);
+    assert.equal(heldReceipt.signal.aborted, true, 'the receipt refresh must share the cancelled upload attempt signal');
+    assert.equal(await view.waitFor(() => transferAction(view, 'retry').props.disabled === false), true,
+      'a cancelled receipt read must release local working even if the server never answers it');
+    assert.equal(nodes(view.renderer, { role: 'alert' }).length, 0);
+    await view.click({ 'data-fm-transfer-action': 'retry' });
+    assert.equal(transferCards(view)[0].props['data-fm-transfer-status'], 'completed');
+    assert.equal(await readFile(path.join(view.root, 'retry.txt'), 'utf8'), 'recovered upload');
+  } finally {
+    heldReceipt?.release();
+    await view.flush();
+  }
 });

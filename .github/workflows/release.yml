@@ -77,23 +77,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # `npm publish` runs prepublishOnly (check, build:native, test); two of
-      # those suites need a real DSH, so install the version this release targets
-      # and prove it resolves. An older runtime would skip the 0.1.7-rc.1 evidence
-      # instead of failing.
+      # prepublishOnly runs the real Config, HTTP, storage and compatibility
+      # suites. This is a reproducible test baseline, not a plugin peer constraint.
       - name: Install the DSH runtime the integration suites resolve
         env:
-          DSH_RUNTIME_VERSION: 0.1.7-rc.1
+          DSH_RUNTIME_VERSION: 0.2.0-rc.2
         run: |
           npm install --global "@deepseek-ai/dsh@${DSH_RUNTIME_VERSION}"
           root="$(npm root -g)/@deepseek-ai/dsh"
           echo "FILE_MANAGER_DSH_RUNTIME_ROOT=${root}" >> "$GITHUB_ENV"
-          echo "FILE_MANAGER_DSH_017_RUNTIME_ROOT=${root}" >> "$GITHUB_ENV"
 
       - name: Assert the integration suites can resolve the DSH runtime
         run: |
           set -euo pipefail
-          for variable in FILE_MANAGER_DSH_RUNTIME_ROOT FILE_MANAGER_DSH_017_RUNTIME_ROOT; do
+          for variable in FILE_MANAGER_DSH_RUNTIME_ROOT; do
             test -f "${!variable}/package.json" || {
               echo "::error::no DSH runtime at ${!variable} (${variable}); refusing to publish behind a silently weakened gate"
               exit 1

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { ZipFile } from 'yazl';
@@ -7,7 +8,7 @@ import type { TaskItemStatus, TaskStatus } from '../contracts/views.js';
 import { toPublicTransfer } from '../contracts/views.js';
 import { chargeVerification, type EntryView, type VerificationBudget } from './io.js';
 import type { Manager } from './manager.js';
-import { createHeavyIoScheduler, type HeavyIoPermit, type HeavyIoScheduler } from './scheduler.js';
+import { createHeavyIoScheduler, type HeavyIoScheduler } from './scheduler.js';
 
 export interface TransferLimits {
   maxFileBytes: number;
@@ -370,7 +371,6 @@ export function createTransferService(options: TransferServiceOptions): Transfer
     task.updatedAt = now();
   }
 
-  const acquire = (signal: AbortSignal): Promise<HeavyIoPermit> => scheduler.acquire({ signal });
   const itemRef = (task: TransferTask, item: TransferItem) => ({ rootId: task.rootId, path: join(task.path, item.path) });
 
   const entryRef = (rootId: string, relativePathValue: string) => ({ rootId, path: relativePathValue });
@@ -459,12 +459,9 @@ export function createTransferService(options: TransferServiceOptions): Transfer
       // The declared manifest total is charged before any body is accepted.
       chargeVerification(budget, items.reduce((sum, item) => sum + item.size, 0));
     } else {
-      const permit = await acquire(signal);
-      try {
-        const prepared = await prepareDownload(input, destination, signal, budget);
-        items = prepared.items;
-        downloadInfo = { downloadKind: prepared.downloadKind, downloadName: prepared.downloadName };
-      } finally { permit.release(); }
+      const prepared = await scheduler.run(() => prepareDownload(input, destination, signal, budget), { signal });
+      items = prepared.items;
+      downloadInfo = { downloadKind: prepared.downloadKind, downloadName: prepared.downloadName };
     }
     const task: TransferTask = {
       id: randomUUID(), type: 'transfer', direction,
@@ -613,7 +610,6 @@ export function createTransferService(options: TransferServiceOptions): Transfer
   }
 
   async function upload(task: TransferTask, item: TransferItem, request: Request, signal: AbortSignal): Promise<FileManagerError | undefined> {
-    let permit: HeavyIoPermit | undefined;
     let stage: { write(chunk: Uint8Array): Promise<void>; commit(validation?: { bytes?: number; sha256?: string }): Promise<EntryView>; abort(): Promise<void> } | undefined;
     let problem: FileManagerError | undefined;
     async function receive(): Promise<void> {
@@ -646,14 +642,17 @@ export function createTransferService(options: TransferServiceOptions): Transfer
       completed(item, await (stage as { commit(validation?: { bytes?: number; sha256?: string }): Promise<EntryView> }).commit({ bytes: item.size, sha256: hash.digest('hex') }));
     }
     try {
-      permit = await acquire(signal); cancelled(signal); available();
-      await verifyDestination(task);
-      await receive();
+      // Run the whole upload in the permit context: staged publication and
+      // overwrite verification must reuse this slot, not queue behind it.
+      await scheduler.run(async () => {
+        cancelled(signal); available();
+        await verifyDestination(task);
+        await receive();
+      }, { signal });
     } catch (error) { problem = failure(error); discardBody(request); }
     finally {
       problem = await cleanupStage(stage, problem, item.committed);
       problem = await finish(task, item, problem);
-      permit?.release();
     }
     return problem;
   }
@@ -731,6 +730,10 @@ export function createTransferService(options: TransferServiceOptions): Transfer
   /** yazl is fed only held safe streams, never addFile(absolutePath). */
   async function zipSource(task: TransferTask, signal: AbortSignal): Promise<PayloadSource> {
     const zip = new ZipFile();
+    // ZIP opens members lazily when the HTTP consumer pulls. Keep those later
+    // callbacks inside the download's scheduler context so openRead reuses its
+    // held permit instead of waiting behind the same download.
+    const inDownload = AsyncLocalStorage.snapshot();
     const sources = new Set<PayloadSource>();
     const opening = new Set<Promise<unknown>>();
     let stopped = false;
@@ -747,7 +750,7 @@ export function createTransferService(options: TransferServiceOptions): Transfer
       }
       // Stored entries are valid streaming ZIP, avoid compression resource pools,
       // and bound memory independently of compressibility and file size.
-      zip.addReadStreamLazy(item.archivePath as string, { size: item.size, compress: false, mtime, mode: 0o100000 | ((item.mode ?? 0) & 0o777) }, callback => {
+      zip.addReadStreamLazy(item.archivePath as string, { size: item.size, compress: false, mtime, mode: 0o100000 | ((item.mode ?? 0) & 0o777) }, callback => inDownload(() => {
         const work = (async () => {
           cancelled(signal);
           if (stopped) fail('CANCELLED', 'The archive was cancelled.', 499);
@@ -761,7 +764,7 @@ export function createTransferService(options: TransferServiceOptions): Transfer
         })();
         opening.add(work);
         work.catch(error => { recordFailure(item, error); callback(failure(error)); }).finally(() => opening.delete(work));
-      });
+      }));
     }
     zip.end();
     return {
@@ -813,7 +816,6 @@ export function createTransferService(options: TransferServiceOptions): Transfer
     activeState.inFlight.set('download', completion);
     let source: PayloadSource | undefined;
     let iterator: AsyncIterator<Buffer> | undefined;
-    let permit: HeavyIoPermit | undefined;
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
     let settling: Promise<FileManagerError | undefined> | undefined;
     const settle = (error?: unknown): Promise<FileManagerError | undefined> => {
@@ -835,7 +837,7 @@ export function createTransferService(options: TransferServiceOptions): Transfer
         try { problem = await finish(activeTask, target, problem); }
         finally {
           activeState.downloadFinishing = false;
-          activeState.inFlight.delete('download'); permit?.release(); complete(problem); notify(activeTask);
+          activeState.inFlight.delete('download'); complete(problem); notify(activeTask);
         }
         return problem;
       })();
@@ -847,53 +849,68 @@ export function createTransferService(options: TransferServiceOptions): Transfer
         try { controller?.error(problem); } catch { /* The consumer may already have cancelled. */ }
       }).catch(() => {});
     };
-    try {
-      permit = await acquire(signal); cancelled(signal); available();
-      activeTask.status = 'running'; await persist(activeTask);
-      if (activeTask.downloadKind === 'zip') source = await zipSource(activeTask, signal);
-      else {
-        (activeTask.items[0] as TransferItem).status = 'running';
-        source = await payloadSource(activeTask, activeTask.items[0] as TransferItem, signal);
-      }
-      cancelled(signal);
-      const activeSource = source;
-      iterator = activeSource.stream[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
-      const stream = new ReadableStream<Uint8Array>({
-        start(value) { controller = value; },
-        async pull() {
-          if (settling) return;
-          try {
-            const chunk = await (iterator as AsyncIterator<Buffer>).next();
+    const open = async (): Promise<Response> => {
+      try {
+        cancelled(signal); available();
+        activeTask.status = 'running'; await persist(activeTask);
+        if (activeTask.downloadKind === 'zip') source = await zipSource(activeTask, signal);
+        else {
+          (activeTask.items[0] as TransferItem).status = 'running';
+          source = await payloadSource(activeTask, activeTask.items[0] as TransferItem, signal);
+        }
+        cancelled(signal);
+        const activeSource = source;
+        iterator = activeSource.stream[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+        const stream = new ReadableStream<Uint8Array>({
+          start(value) { controller = value; },
+          async pull() {
             if (settling) return;
-            if (chunk.done) {
-              await activeSource.verify(); cancelled(signal);
-              const problem = await settle();
-              if (problem) controller?.error(problem); else controller?.close();
-            } else {
-              activeTask.wireBytesTransferred = (activeTask.wireBytesTransferred ?? 0) + chunk.value.byteLength;
-              controller?.enqueue(new Uint8Array(chunk.value.buffer, chunk.value.byteOffset, chunk.value.byteLength));
+            try {
+              const chunk = await (iterator as AsyncIterator<Buffer>).next();
+              if (settling) return;
+              if (chunk.done) {
+                await activeSource.verify(); cancelled(signal);
+                const problem = await settle();
+                if (problem) controller?.error(problem); else controller?.close();
+              } else {
+                activeTask.wireBytesTransferred = (activeTask.wireBytesTransferred ?? 0) + chunk.value.byteLength;
+                controller?.enqueue(new Uint8Array(chunk.value.buffer, chunk.value.byteOffset, chunk.value.byteLength));
+              }
+            } catch (error) {
+              const problem = await settle(error);
+              try { controller?.error(problem); } catch { /* Cancellation already closed the stream. */ }
             }
-          } catch (error) {
-            const problem = await settle(error);
-            try { controller?.error(problem); } catch { /* Cancellation already closed the stream. */ }
-          }
-        },
-        async cancel() { activeState.cancelled = true; local.abort(); await settle(new FileManagerError('CANCELLED', 'The download was cancelled.', 499)); },
-      }, { highWaterMark: 0 });
-      signal.addEventListener('abort', onAbort, { once: true });
-      if (signal.aborted) onAbort();
-      const filename = activeTask.downloadName as string;
-      const fallback = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
-      const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-      return new Response(stream, { headers: {
-        'content-type': activeTask.downloadKind === 'zip' ? 'application/zip' : 'application/octet-stream',
-        'content-disposition': `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
-        'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
-      } });
-    } catch (error) {
+          },
+          async cancel() { activeState.cancelled = true; local.abort(); await settle(new FileManagerError('CANCELLED', 'The download was cancelled.', 499)); },
+        }, { highWaterMark: 0 });
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        const filename = activeTask.downloadName as string;
+        const fallback = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+        const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+        return new Response(stream, { headers: {
+          'content-type': activeTask.downloadKind === 'zip' ? 'application/zip' : 'application/octet-stream',
+          'content-disposition': `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
+          'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+        } });
+      } catch (error) {
+        const problem = await settle(error);
+        return json({ ok: false, error: errorDTO(problem as FileManagerError), value: toPublicTransfer(get(activeTask.id)) }, (problem as FileManagerError).status);
+      }
+    };
+    let respond!: (response: Response) => void;
+    let rejectResponse!: (error: unknown) => void;
+    const response = new Promise<Response>((resolve, reject) => { respond = resolve; rejectResponse = reject; });
+    // Opening the HTTP response is not the end of the heavy operation. Retain
+    // its reentrant scheduler context and permit until EOF/cancellation cleanup.
+    void scheduler.run(async () => {
+      respond(await open());
+      await completion;
+    }, { signal }).catch(async error => {
       const problem = await settle(error);
-      return json({ ok: false, error: errorDTO(problem as FileManagerError), value: toPublicTransfer(get(activeTask.id)) }, (problem as FileManagerError).status);
-    }
+      respond(json({ ok: false, error: errorDTO(problem as FileManagerError), value: toPublicTransfer(get(activeTask.id)) }, (problem as FileManagerError).status));
+    }).catch(rejectResponse);
+    return response;
   }
 
   async function cancel(id: unknown): Promise<TransferTask> {

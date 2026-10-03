@@ -196,7 +196,9 @@ export function FileSection(props: FileSectionProps): ReactNode {
         {button({ t, ui }, 'download', { disabled: !capabilities.transfers || !rootId || selectedEntries.length > 1 || busy > 0, onClick: actions.beginDownload, 'data-fm-action': 'download' })}
         {button({ t, ui }, 'reference', { disabled: !capabilities.references || !selectedEntries.length || busy > 0, onClick: actions.beginReference, 'data-fm-action': 'reference' })}
         <input type="file" multiple hidden ref={uploadInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadFiles')} data-fm-upload-files />
-        <input type="file" multiple hidden ref={directoryInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadDirectory')} data-fm-upload-directory-input />
+        {/* React 18 has no typed webkitdirectory prop; the empty string emits
+            the native boolean attribute rather than dropping an unknown boolean. */}
+        <input type="file" {...{ webkitdirectory: '' }} multiple hidden ref={directoryInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadDirectory')} data-fm-upload-directory-input />
       </div>
       {directoryFallback ? <div className="fm-notice">{t('directoryFallback')}</div> : null}
       {clipboard ? <div className="fm-muted" style={{ padding: '4px 12px' }}>{`${t('clipboard')}: ${t(clipboard.operation === 'move' ? 'cut' : 'copy')} · ${clipboard.items.length} ${t('items')}`}</div> : null}
