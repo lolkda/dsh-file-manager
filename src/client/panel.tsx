@@ -25,6 +25,7 @@ import type { DocumentStore, OpenDocument } from './documents.js';
 import { AttemptSlot, type UiPrimitives } from './ui.js';
 import { CodeEditor } from './code-editor.js';
 import { PANEL_CSS } from './styles.js';
+import { Notice } from './notice.js';
 import {
   EMPTY_LISTING, FileSection, applyPage, type FileActions, type FileCapabilities,
   type ListingPage, type ListingState, type UnaddressableEntry,
@@ -116,6 +117,7 @@ export function Panel(props: PanelProps): ReactNode {
   const [referencePlan, setReferencePlan] = useState<{ mention: string }[] | null>(null);
   const [referenceSession, setReferenceSession] = useState('');
   const [directoryFallback, setDirectoryFallback] = useState(false);
+  const [dismissedClipboard, setDismissedClipboard] = useState<unknown>(null);
   const [watchStatus, setWatchStatus] = useState<WatchStatus>('connecting');
   const [pathInput, setPathInput] = useState('/');
   const [busy, setBusy] = useState(0);
@@ -938,6 +940,11 @@ export function Panel(props: PanelProps): ReactNode {
   };
 
   const fileActions: FileActions = {
+    dismissNotice(kind) {
+      if (kind === 'directory-fallback') setDirectoryFallback(false);
+      else if (kind === 'operation-result') setOperationResult(null);
+      else setDismissedClipboard(activities.clipboard);
+    },
     openDirectory,
     openFile,
     refresh,
@@ -982,7 +989,7 @@ export function Panel(props: PanelProps): ReactNode {
         <div><h1>{t('title')}</h1><div className="fm-subtitle">{t('subtitle')}</div></div>
         <span className="fm-badge">{t('stage')}</span>
       </header>
-      {error ? <div className="fm-error" role="alert">{errorText(error)}</div> : null}
+      {error ? <Notice t={t} ui={ui} id="error" error onDismiss={() => setError(null)}>{errorText(error)}</Notice> : null}
       {degraded ? (
         <div className="fm-notice" role="status" data-fm-degraded={degraded.scope}>
           {`${t('degraded')}: ${degraded.message}`}
@@ -1035,7 +1042,7 @@ export function Panel(props: PanelProps): ReactNode {
         </aside>
         <FileSection
           t={t} ui={ui} busy={busy} capabilities={allowed} rootId={rootId} root={root} directory={directory}
-          listing={listing} selection={selection} selected={selected} clipboard={activities.clipboard} directoryFallback={directoryFallback}
+          listing={listing} selection={selection} selected={selected} clipboard={activities.clipboard} clipboardNoticeVisible={activities.clipboard !== dismissedClipboard} directoryFallback={directoryFallback}
           operationResult={operationResult} selectionSaving={selectionSaving} loadingMore={appendPending.current} errorText={errorText}
           uploadInput={uploadInput} directoryInput={directoryInput} actions={fileActions}
         />

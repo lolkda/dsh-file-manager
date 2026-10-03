@@ -12,6 +12,7 @@
  */
 
 import type { ReactNode, RefObject } from 'react';
+import { Notice } from './notice.js';
 import type { EntrySnapshot, UnaddressableEntry } from '../contracts/protocol.js';
 import type { Translate } from './i18n.js';
 import type { PrimitiveProps, UiPrimitives } from './ui.js';
@@ -98,6 +99,7 @@ export interface FileCapabilities {
 }
 
 export interface FileActions {
+  dismissNotice(kind: 'directory-fallback' | 'clipboard' | 'operation-result'): void;
   openDirectory(id: string, path: string, append?: boolean): void;
   openFile(entry: EntrySnapshot): void;
   refresh(): void;
@@ -126,6 +128,7 @@ export interface FileSectionProps {
   readonly selected: string;
   readonly clipboard: { operation: 'copy' | 'move'; items: readonly unknown[] } | null;
   readonly directoryFallback: boolean;
+  readonly clipboardNoticeVisible: boolean;
   readonly operationResult: { status: string; results: readonly { path: string; status: string; error?: { code?: string } | undefined }[] } | null;
   readonly selectionSaving: boolean;
   readonly loadingMore: boolean;
@@ -159,7 +162,7 @@ function FileIcon(): ReactNode {
 export { FolderIcon, FileIcon };
 
 export function FileSection(props: FileSectionProps): ReactNode {
-  const { t, ui, busy, capabilities, rootId, root, directory, listing, selection, selected, clipboard, directoryFallback, operationResult, selectionSaving, loadingMore, errorText, uploadInput, directoryInput, actions } = props;
+  const { t, ui, busy, capabilities, rootId, root, directory, listing, selection, selected, clipboard, clipboardNoticeVisible, directoryFallback, operationResult, selectionSaving, loadingMore, errorText, uploadInput, directoryInput, actions } = props;
   const crumbs = directory ? directory.split('/') : [];
   const selectedEntries = listing.entries.filter(entry => selection.includes(entry.path));
   const selectable = (kind: string): boolean => ['file', 'directory', 'symlink'].includes(kind);
@@ -200,16 +203,18 @@ export function FileSection(props: FileSectionProps): ReactNode {
             the native boolean attribute rather than dropping an unknown boolean. */}
         <input type="file" {...{ webkitdirectory: '' }} multiple hidden ref={directoryInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadDirectory')} data-fm-upload-directory-input />
       </div>
-      {directoryFallback ? <div className="fm-notice">{t('directoryFallback')}</div> : null}
-      {clipboard ? <div className="fm-muted" style={{ padding: '4px 12px' }}>{`${t('clipboard')}: ${t(clipboard.operation === 'move' ? 'cut' : 'copy')} · ${clipboard.items.length} ${t('items')}`}</div> : null}
+      {directoryFallback ? <Notice t={t} ui={ui} id="directory-fallback" onDismiss={() => actions.dismissNotice('directory-fallback')}>{t('directoryFallback')}</Notice> : null}
+      {clipboard && clipboardNoticeVisible ? <Notice t={t} ui={ui} id="clipboard" onDismiss={() => actions.dismissNotice('clipboard')}>{`${t('clipboard')}: ${t(clipboard.operation === 'move' ? 'cut' : 'copy')} · ${clipboard.items.length} ${t('items')}`}</Notice> : null}
       {selectedEntries.length > 0 ? <div className="fm-muted" style={{ padding: '4px 12px' }}>{`${selectedEntries.length} ${t('selected')}`}</div> : null}
       {operationResult ? (
-        <div className="fm-notice" data-fm-operation-result={operationResult.status}>
-          {t(`status.${operationResult.status}`)}
-          {operationResult.results.map(result => (
-            <div key={`${result.path}:${result.status}`}>{`${result.path}: ${t(`status.${result.status}`)}${result.error ? ` · ${errorText(result.error)}` : ''}`}</div>
-          ))}
-        </div>
+        <Notice t={t} ui={ui} id="operation-result" onDismiss={() => actions.dismissNotice('operation-result')}>
+          <div data-fm-operation-result={operationResult.status}>
+            {t(`status.${operationResult.status}`)}
+            {operationResult.results.map(result => (
+              <div key={`${result.path}:${result.status}`}>{`${result.path}: ${t(`status.${result.status}`)}${result.error ? ` · ${errorText(result.error)}` : ''}`}</div>
+            ))}
+          </div>
+        </Notice>
       ) : null}
       <div className="fm-scroll" aria-busy={busy > 0}>
         {!rootId ? <div className="fm-placeholder"><FolderIcon size={34} />{busy ? t('loading') : t('emptyRoots')}</div> : null}

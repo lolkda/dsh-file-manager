@@ -39,6 +39,9 @@ export const PANEL_CSS = `
 .dsh-fm .fm-preview pre,.dsh-fm .fm-editor{flex:1;min-height:160px;overflow:auto;margin:0;padding:16px;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;white-space:pre;border:0;border-radius:0;resize:none;width:100%;outline-offset:-2px}
 .dsh-fm .fm-preview-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.dsh-fm .fm-actions{display:flex;gap:5px;align-items:center;flex-wrap:wrap}.dsh-fm .fm-tabs{display:flex;gap:3px;overflow:auto;border-bottom:1px solid var(--dsw-alias-border-l1);padding:5px}
 .dsh-fm .fm-tabs button{white-space:nowrap;max-width:230px;overflow:hidden;text-overflow:ellipsis;font-size:12px}.dsh-fm .fm-error,.dsh-fm .fm-notice{margin:8px 12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;font-size:12px;line-height:1.5}.dsh-fm .fm-error{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.dsh-fm .fm-dismissible-notice{display:flex;align-items:flex-start;gap:8px;min-width:0;flex:none}
+.dsh-fm .fm-notice-content{flex:1;min-width:0;max-height:18vh;overflow:auto;overflow-wrap:anywhere}
+.dsh-fm .fm-notice-close{flex:none;min-width:28px;min-height:28px}
 .dsh-fm footer{padding:8px 14px;border-top:1px solid var(--dsw-alias-border-l1);display:flex;gap:14px;justify-content:space-between;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-fm .fm-more{display:block;margin:12px auto}
 .dsh-fm-dialog{color:var(--dsw-alias-label-primary);font:inherit}
 /* Dialogs render in a portal, so the .dsh-fm rules above never reach them:
