@@ -291,3 +291,23 @@ test('real mixed history clearing retains a failed-persistence card while closin
   await access(path.join(view.root, 'hello.txt'));
   await access(path.join(view.root, 'history-upload.txt'));
 });
+
+// Byte accounting still drives progress; task summaries show item counts only.
+test('copy, move, upload and download cards omit byte text but retain counts and progress', async t => {
+  const { view } = await historyPanel(t, {
+    taskRecords: ['copy', 'move'].map(operation => taskSnapshot({ id: operation, operation })),
+    transferRecords: ['upload', 'download'].map(direction => transferSnapshot({ id: direction, direction })),
+  });
+  for (const kind of ['copy', 'move', 'upload', 'download']) {
+    const isTask = kind === 'copy' || kind === 'move';
+    const card = node(view.renderer, isTask
+      ? { 'data-fm-task-id': kind, 'data-fm-task-status': 'completed' }
+      : { 'data-fm-transfer-id': kind, 'data-fm-transfer-status': 'completed' });
+    const header = card.findByProps({ className: 'fm-actions' });
+    assert.match(textOf(header), /1\/1 项/);
+    assert.doesNotMatch(textOf(header), /字节|bytes|4\/4| · 4/);
+    const progress = card.findByType('progress');
+    assert.equal(progress.props.max, 4);
+    assert.equal(progress.props.value, 4);
+  }
+});

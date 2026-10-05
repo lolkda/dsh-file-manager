@@ -1110,7 +1110,7 @@ export function Panel(props: PanelProps): ReactNode {
                 <article key={record.id} className="fm-notice" data-fm-task-id={record.id} data-fm-task-status={record.status}>
                   <div className="fm-actions">
                     <strong>{`${t(record.operation === 'move' ? 'moveTask' : 'copyTask')} · ${t(`status.${record.status}`)}`}</strong>
-                    <span>{`${progress.completed}/${progress.total} ${t('items')} · ${progress.bytes.toLocaleString()} ${t('bytes')}`}</span>
+                    <span>{`${progress.completed}/${progress.total} ${t('items')}`}</span>
                     {isActivityRunning(record) ? button('cancelTask', { onClick: () => taskAction('cancel', record), disabled: Boolean(record.cancelRequested), 'data-fm-task-action': 'cancel', 'data-fm-task-id': record.id }) : null}
                     {!isActivityRunning(record) && record.items.some(item => item.status === 'failed') ? button('retry', { onClick: () => taskAction('retry', record), disabled: busy > 0, 'data-fm-task-action': 'retry', 'data-fm-task-id': record.id }) : null}
                     {closeActivityButton('task', record)}
@@ -1136,7 +1136,7 @@ export function Panel(props: PanelProps): ReactNode {
                 <article key={record.id} className="fm-notice" data-fm-transfer-id={record.id} data-fm-transfer-status={record.status}>
                   <div className="fm-actions">
                     <strong>{`${t(record.direction === 'upload' ? 'uploadTask' : 'downloadTask')} · ${t(record.direction === 'download' && record.completion === 'server-stream-finished' ? 'serverFinished' : `status.${record.status}`)}`}</strong>
-                    <span>{`${record.itemsCompleted}/${record.itemsTotal} ${t('items')} · ${record.bytesTransferred.toLocaleString()}/${record.bytesTotal.toLocaleString()} ${t('bytes')}`}</span>
+                    <span>{`${record.itemsCompleted}/${record.itemsTotal} ${t('items')}`}</span>
                     {isActivityRunning(record) ? button('cancelTask', { onClick: () => transferAction('cancel', record), 'data-fm-transfer-action': 'cancel', 'data-fm-transfer-id': record.id }) : null}
                     {!['queued', 'running', 'completed'].includes(record.status) ? button('retry', { disabled: busy > 0 || !canRetryTransfer(record), onClick: () => transferAction('retry', record), 'data-fm-transfer-action': 'retry', 'data-fm-transfer-id': record.id }) : null}
                     {closeActivityButton('transfer', record)}
