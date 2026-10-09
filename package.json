@@ -1,6 +1,6 @@
 {
   "name": "@lolkda/dsh-file-manager",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "Independent DSH file manager with explicit Host-local root grants",
   "keywords": [
     "dsh",
@@ -44,6 +44,10 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
+    "verify-agent-note-tree": "node scripts/verify-agent-note-tree.ts",
+    "verify-agent-note-format": "node scripts/verify-agent-note-format.ts",
+    "verify-archived": "node scripts/verify-archived-agent-notes.ts",
+    "verify-notes": "npm run verify-agent-note-tree && npm run verify-agent-note-format && npm run verify-archived",
     "build": "node scripts/build.mjs",
     "build:host": "tsc -p tsconfig.host.json",
     "typecheck": "tsc -p tsconfig.host.json --noEmit --declaration false --declarationMap false --sourceMap false && tsc -p tsconfig.client.json",

@@ -31,6 +31,8 @@ export const PANEL_CSS = `
 .dsh-fm .fm-breadcrumb-bar>.fm-crumbs>button{flex:none;white-space:nowrap}
 .dsh-fm .fm-crumb{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto;white-space:nowrap}
 .dsh-fm .fm-breadcrumb-bar>button{flex:none;white-space:nowrap}
+.dsh-fm .fm-copy-directory-path{min-width:28px;min-height:28px;padding:4px}
+.dsh-fm .fm-path-copy-text{display:block;width:100%;min-width:0;margin-top:8px;padding:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;font:12px/1.5 ui-monospace,monospace;resize:vertical}
 .dsh-fm .fm-scroll{flex:1;min-height:0;overflow:auto;padding:8px}.dsh-fm .fm-entryline{display:grid;grid-template-columns:32px minmax(0,1fr);align-items:center;gap:4px;min-width:0}
 .dsh-fm .fm-selection-control{display:grid;place-items:center;align-self:stretch;min-height:36px;cursor:pointer}.dsh-fm input.fm-selection[type=checkbox]{width:16px;height:16px;padding:0;margin:0;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}.dsh-fm input.fm-selection:disabled{cursor:not-allowed;opacity:.5}
 .dsh-fm .fm-row{display:flex;align-items:center;justify-content:flex-start;gap:9px;width:100%;min-width:0;min-height:36px;text-align:left;padding:8px 9px;margin:1px 0;font-size:13px;line-height:20px;height:auto}

@@ -256,7 +256,6 @@ export function Panel(props: PanelProps): ReactNode {
   const openFile = (entry: EntrySnapshot): void => { void run(async () => {
     const ticket = ++fileGeneration.current;
     setSelected(entry.path);
-    setSelection([entry.path]);
     const existing = documents.getSnapshot().documents.find(item => item.rootId === rootId && item.path === entry.path);
     if (existing) documents.activate(existing.id);
     const value = await api.control({ op: 'text.read', rootId, path: entry.path });

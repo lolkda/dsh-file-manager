@@ -93,9 +93,9 @@ test('C1: a late useSessions hook is actually used, not merely survived', { skip
     assert.ok(calls.length > 0, 'the panel must call the late-arriving hook');
 
     // Selecting an entry is required before referencing it to a session.
-    const row = withAttribute(renderer, 'data-fm-entry')[0];
-    assert.ok(row, 'the listing must render a selectable entry');
-    await act(async () => { row.props.onClick({ preventDefault() {}, stopPropagation() {} }); });
+    const checkbox = renderer.root.findAll(node => node.type === 'input' && node.props.className === 'fm-selection')[0];
+    assert.ok(checkbox, 'the listing must render a selection checkbox');
+    await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
     await settle(renderer);
     assert.equal(referenceButton().props.disabled, false, 'with a catalog and a selection the reference action must be enabled');
 

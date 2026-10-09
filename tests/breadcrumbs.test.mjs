@@ -66,7 +66,7 @@ const refreshControl = view => node(view.renderer, { 'data-fm-action': 'refresh'
 const pathRow = view => hostParent(refreshControl(view));
 
 /** Every crumb control in the path row, root level first, then each path level. */
-const crumbControls = view => pathRow(view).findAll(candidate => candidate.type === 'button' && candidate.props['data-fm-action'] !== 'refresh');
+const crumbControls = view => crumbRegion(view).findAll(candidate => candidate.type === 'button');
 
 /** The rendered crumb items, in order: one per path level. */
 const crumbItems = view => pathRow(view).findAll(candidate => hasClass(candidate, 'fm-crumb'));
@@ -169,7 +169,7 @@ const isZeroLength = value => /^0(px|em|rem|%|vh|vw)?$/.test(String(value ?? '')
 
 // --- structure ---------------------------------------------------------------
 
-test('the path row is the breadcrumb bar: one navigation region plus the refresh control', async t => {
+test('the path row keeps one scrolling navigation region and fixed refresh and copy controls', async t => {
   const view = await setup(t);
   const row = pathRow(view);
   assert.ok(hasClass(row, 'fm-breadcrumb-bar'), `the top path row must carry the approved breadcrumb-bar class (got "${row.props.className ?? ''}")`);
@@ -181,6 +181,7 @@ test('the path row is the breadcrumb bar: one navigation region plus the refresh
   assert.equal(declared(rowStyle, 'align-items'), 'center');
   assert.equal(declared(rowStyle, 'flex-wrap') ?? 'nowrap', 'nowrap', 'a wrapping bar would hide levels instead of scrolling them');
   assert.equal(hostParent(refreshControl(view)), row, 'the refresh control must be the bar\'s own child, outside the scrolling region');
+  assert.equal(hostParent(node(view.renderer, { 'data-fm-action': 'copy-directory-path' })), row, 'the path-copy control must stay outside the scrolling navigation region');
   const region = crumbRegion(view);
   assert.ok(hasClass(region, 'fm-crumbs'), `the navigation region must carry the crumb container class (got "${region.props.className ?? ''}")`);
   assert.equal(hostParent(region), row, 'the navigation region must be the bar\'s own child');

@@ -13,6 +13,7 @@
 
 import type { ReactNode, RefObject } from 'react';
 import { Notice } from './notice.js';
+import { absoluteEntryPath, PathCopyNotice, usePathCopy } from './path-copy.js';
 import type { EntrySnapshot, UnaddressableEntry } from '../contracts/protocol.js';
 import type { Translate } from './i18n.js';
 import type { PrimitiveProps, UiPrimitives } from './ui.js';
@@ -163,6 +164,7 @@ export { FolderIcon, FileIcon };
 
 export function FileSection(props: FileSectionProps): ReactNode {
   const { t, ui, busy, capabilities, rootId, root, directory, listing, selection, selected, clipboard, clipboardNoticeVisible, directoryFallback, operationResult, selectionSaving, loadingMore, errorText, uploadInput, directoryInput, actions } = props;
+  const pathCopy = usePathCopy();
   const crumbs = directory ? directory.split('/') : [];
   const selectedEntries = listing.entries.filter(entry => selection.includes(entry.path));
   const selectable = (kind: string): boolean => ['file', 'directory', 'symlink'].includes(kind);
@@ -184,6 +186,16 @@ export function FileSection(props: FileSectionProps): ReactNode {
             </span>
           ))}
         </nav>
+        <ui.Button variant="ghost" size="sm" type="button" className="fm-copy-directory-path"
+          disabled={!root || busy > 0 || pathCopy.pending}
+          onClick={() => { if (root && !busy) void pathCopy.copy([absoluteEntryPath(root.path, directory)]); }}
+          title={t('copyDirectoryPath')} aria-label={t('copyDirectoryPath')} data-fm-action="copy-directory-path"
+        >
+          <svg width={16} height={16} viewBox="0 0 24 24" fill="none" aria-hidden>
+            <rect x={8} y={8} width={12} height={13} rx={2} stroke="currentColor" strokeWidth={1.6} />
+            <path d="M15 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3" stroke="currentColor" strokeWidth={1.6} />
+          </svg>
+        </ui.Button>
         {button({ t, ui }, 'refresh', { disabled: !rootId || busy > 0, onClick: actions.refresh, 'data-fm-action': 'refresh' })}
       </div>
       <div className="fm-pathbar fm-actions">
@@ -192,6 +204,11 @@ export function FileSection(props: FileSectionProps): ReactNode {
         {button({ t, ui }, 'rename', { disabled: !capabilities.write || selectedEntries.length !== 1 || busy > 0 || selectionSaving, onClick: () => actions.beginName('rename'), 'data-fm-action': 'rename' })}
         {button({ t, ui }, 'delete', { disabled: !capabilities.write || !selectedEntries.length || busy > 0 || selectionSaving, onClick: actions.prepareDelete, 'data-fm-action': 'delete' })}
         {button({ t, ui }, 'copy', { disabled: !capabilities.tasks || !selectedEntries.length || busy > 0 || selectionSaving, onClick: () => actions.copySelection('copy'), 'data-fm-action': 'copy' })}
+        {button({ t, ui }, 'copySelectedPaths', {
+          disabled: !root || !selectedEntries.length || busy > 0 || pathCopy.pending,
+          onClick: () => { if (root && !busy) void pathCopy.copy(selectedEntries.map(entry => absoluteEntryPath(root.path, entry.path))); },
+          'data-fm-action': 'copy-selected-paths',
+        })}
         {button({ t, ui }, 'cut', { disabled: !capabilities.tasks || !selectedEntries.length || busy > 0 || selectionSaving, onClick: () => actions.copySelection('move'), 'data-fm-action': 'cut' })}
         {button({ t, ui }, 'paste', { disabled: !capabilities.tasks || !clipboard || !rootId || busy > 0, onClick: actions.preparePaste, 'data-fm-action': 'paste' })}
         {button({ t, ui }, 'uploadFiles', { disabled: !capabilities.transfers || !rootId || busy > 0, onClick: () => actions.pickUpload('files'), 'data-fm-action': 'upload-files' })}
@@ -203,6 +220,7 @@ export function FileSection(props: FileSectionProps): ReactNode {
             the native boolean attribute rather than dropping an unknown boolean. */}
         <input type="file" {...{ webkitdirectory: '' }} multiple hidden ref={directoryInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadDirectory')} data-fm-upload-directory-input />
       </div>
+      <PathCopyNotice t={t} ui={ui} result={pathCopy.result} dismiss={pathCopy.dismiss} />
       {directoryFallback ? <Notice t={t} ui={ui} id="directory-fallback" onDismiss={() => actions.dismissNotice('directory-fallback')}>{t('directoryFallback')}</Notice> : null}
       {clipboard && clipboardNoticeVisible ? <Notice t={t} ui={ui} id="clipboard" onDismiss={() => actions.dismissNotice('clipboard')}>{`${t('clipboard')}: ${t(clipboard.operation === 'move' ? 'cut' : 'copy')} · ${clipboard.items.length} ${t('items')}`}</Notice> : null}
       {selectedEntries.length > 0 ? <div className="fm-muted" style={{ padding: '4px 12px' }}>{`${selectedEntries.length} ${t('selected')}`}</div> : null}

@@ -279,9 +279,15 @@ export async function setup(t, options = {}) {
   result.click = async props => {
     await act(async () => { await node(result.renderer, props).props.onClick(); await result.settle(); });
   };
+  result.select = async (name, checked = true) => {
+    await act(async () => { node(result.renderer, { type: 'checkbox', 'aria-label': `选择: ${name}` }).props.onChange({ target: { checked } }); });
+  };
+  // Common operation fixture: explicitly select as well as preview the file.
+  // R22 separates these gestures; preview-only tests click the file row directly.
   result.openHello = async () => {
     await result.click({ 'data-fm-entry': 'directory', 'data-fm-path': 'folder' });
     await result.click({ 'data-fm-entry': 'file', 'data-fm-path': 'folder/hello.txt' });
+    await result.select('hello.txt');
   };
   await result.mount({ settle: options.settleInitial !== false });
   return result;
