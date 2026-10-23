@@ -61,8 +61,8 @@ async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-fm-tree-'));
   const root = path.join(base, 'root');
   await mkdir(root);
-  const manager = createManager(options);
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ ...options, rootPath: root });
+  const grant = manager.getRoot();
   // Close the manager before removing its directory: an open manager keeps root
   // descriptors and pending plans alive, and teardown must not race them.
   t.after(async () => {

@@ -2,13 +2,22 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, symlink, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { act, node, nodes, setup, textOf } from './client-harness.mjs';
+import { act, clickRootCrumb, node, nodes, setup } from './client-harness.mjs';
 
 const current = { 'data-fm-action': 'copy-directory-path' };
 const selected = { 'data-fm-action': 'copy-selected-paths' };
-const result = status => ({ 'data-fm-path-copy-result': status });
 const manual = { 'data-fm-path-copy-text': true };
-const dismiss = { 'data-fm-notice-dismiss': 'path-copy' };
+// The copy banner is gone: the event lives in the plugin-owned notification
+// history (level/code) and the manual text lives in its detail. Banner nodes are
+// still asserted absent, so a regression that re-adds one fails here.
+const entriesOf = view => view.notifications.getSnapshot().entries;
+const successes = view => entriesOf(view).filter(entry => entry.level === 'success');
+const failures = view => entriesOf(view).filter(entry => entry.action?.kind === 'manual-copy');
+const manualTexts = view => entriesOf(view).filter(entry => entry.action?.kind === 'manual-copy').map(entry => entry.action.text);
+const legacyBanners = view => view.renderer.root.findAll(entry => typeof entry.type === 'string'
+  && (entry.props['data-fm-notice-dismiss'] !== undefined || entry.props['data-fm-path-copy-result'] !== undefined)).length;
+const dismissOldest = view => view.click({ 'data-fm-action': 'notification-dismiss', 'data-fm-notification-id': entriesOf(view).at(-1).id });
+const dismissAll = async view => { for (const entry of [...entriesOf(view)]) await dismissOldest(view); };
 const browser = writeText => ({ navigator: { clipboard: { writeText } } });
 const openFolder = view => view.click({ 'data-fm-entry': 'directory', 'data-fm-path': 'folder' });
 const preview = view => view.click({ 'data-fm-entry': 'file', 'data-fm-path': 'folder/hello.txt' });
@@ -21,7 +30,9 @@ test('current directory copy ignores selection, makes no requests and has an acc
   assert.equal(control.props['aria-label'], '复制当前目录路径');
   assert.equal(control.props.title, '复制当前目录路径');
   assert.equal(node(view.renderer, selected).props.disabled, true);
+  const firstBefore = successes(view).length;
   await view.click(current);
+  assert.equal(successes(view).length, firstBefore + 1);
   assert.equal(copied.pop(), view.root);
   await openFolder(view);
   await view.select('hello.txt');
@@ -29,11 +40,12 @@ test('current directory copy ignores selection, makes no requests and has an acc
   await view.click(current);
   assert.equal(copied.pop(), `${view.root}/folder`);
   assert.equal(view.requests.length, before);
-  assert.equal(textOf(node(view.renderer, result('copied'))), '已复制');
-  await view.click(dismiss);
-  assert.equal(nodes(view.renderer, result('copied')).length, 0);
+  assert.equal(legacyBanners(view), 0, 'the copy banner is gone');
+  assert.equal(successes(view).length, 2, 'each accepted copy is its own event');
+  await dismissAll(view);
+  assert.deepEqual(entriesOf(view), [], 'dismissing the events leaves no copy feedback behind');
   await view.click(current);
-  assert.equal(nodes(view.renderer, result('copied')).length, 1);
+  assert.equal(successes(view).length, 1, 'a fresh copy is a fresh event');
 });
 
 test('opening a preview neither checks a file nor replaces existing checkbox selection', async t => {
@@ -71,7 +83,8 @@ test('multi-selection copies files, directories and link locations in listing or
   await view.click(selected);
   assert.equal(view.requests.length, before, 'copy must not stat entries or follow a symlink');
   assert.deepEqual(copied, [entries.map(name => `${view.root}/folder/${name}`).join('\n')]);
-  assert.equal(textOf(node(view.renderer, result('copied'))), `已复制 ${entries.length} 条路径`);
+  assert.equal(successes(view).length, 1, 'the multi-path copy is one success event');
+  assert.equal(entriesOf(view)[0].level, 'success');
   assert.equal(copied[0].endsWith('\n'), false);
   await view.click(current);
   assert.equal(copied.at(-1), `${view.root}/folder`);
@@ -123,7 +136,7 @@ test('filesystem root formatting preserves / without generating //', async t => 
     if (init.body && JSON.parse(init.body).op === 'bootstrap') {
       const body = await response.json();
       // Only presentation metadata changes; all real filesystem access stays in the fixture root.
-      body.value.roots = body.value.roots.map(root => ({ ...root, path: '/' }));
+      body.value.root = { ...body.value.root, path: '/', label: '/' };
       return Response.json(body);
     }
     return response;
@@ -146,17 +159,19 @@ for (const [name, window] of [
   test(`${name} exposes complete readonly text and never reports success`, async t => {
     const view = await setup(t, { window });
     await view.click(current);
-    assert.equal(nodes(view.renderer, result('copied')).length, 0);
-    assert.equal(nodes(view.renderer, result('failed')).length, 1);
+    assert.equal(legacyBanners(view), 0);
+    // This view is fresh and exactly one action ran, so the totals are the deltas.
+    assert.equal(failures(view).length, 1, 'a refused write is one error event');
+    assert.equal(successes(view).length, 0, 'a refused write never adds a success');
+    assert.deepEqual(manualTexts(view), [view.root], 'the complete text is kept in the event');
     const field = node(view.renderer, manual);
     assert.equal(field.props.value, view.root);
     assert.equal(field.props.readOnly, true);
     assert.equal(field.props['aria-label'], '手动复制的路径文本');
-    assert.match(textOf(node(view.renderer, result('failed'))), /手动复制/);
-    await view.click(dismiss);
-    assert.equal(nodes(view.renderer, manual).length, 0);
+    await dismissOldest(view);
+    assert.equal(nodes(view.renderer, manual).length, 0, 'dismissing the event removes the fallback UI with it');
     await view.click(current);
-    assert.equal(nodes(view.renderer, manual).length, 1);
+    assert.ok(nodes(view.renderer, manual).length >= 1, 'the retry offers the text again');
   });
 }
 
@@ -166,12 +181,13 @@ test('a failed multi-path copy preserves every path; a later success clears the 
   await view.select('other.txt');
   await view.select('folder');
   await view.click(selected);
-  assert.equal(node(view.renderer, manual).props.value, `${view.root}/folder\n${view.root}/other.txt`);
+  assert.deepEqual(manualTexts(view), [`${view.root}/folder\n${view.root}/other.txt`]);
   denied = false;
   await view.click(current);
-  assert.equal(nodes(view.renderer, manual).length, 0);
-  assert.equal(nodes(view.renderer, result('failed')).length, 0);
-  assert.equal(nodes(view.renderer, result('copied')).length, 1);
+  assert.equal(entriesOf(view)[0].level, 'success', 'the newest event is the successful copy');
+  assert.deepEqual(manualTexts(view), [`${view.root}/folder\n${view.root}/other.txt`],
+    'the earlier failure keeps its text in the history instead of being silently dropped');
+  assert.equal(successes(view).length, 1);
 });
 
 test('pending clipboard write serializes clicks and reports success only after completion', async t => {
@@ -186,11 +202,11 @@ test('pending clipboard write serializes clicks and reports success only after c
   assert.deepEqual(copied, [view.root], 'the write starts in the click call stack, exactly once');
   assert.equal(node(view.renderer, current).props.disabled, true);
   assert.equal(node(view.renderer, selected).props.disabled, true);
-  assert.equal(nodes(view.renderer, result('copied')).length, 0);
+  assert.equal(successes(view).length, 0);
   await act(async () => { resolve(); await pending; });
   assert.equal(node(view.renderer, current).props.disabled, false);
   assert.equal(node(view.renderer, selected).props.disabled, false);
-  assert.equal(nodes(view.renderer, result('copied')).length, 1);
+  assert.equal(successes(view).length, 1);
 });
 
 test('an old copy completion after remount cannot reopen a notice', async t => {
@@ -201,8 +217,9 @@ test('an old copy completion after remount cannot reopen a notice', async t => {
   view.unmount();
   await view.mount();
   await act(async () => { reject(new Error('late rejection')); await pending.catch(() => {}); });
-  assert.equal(nodes(view.renderer, result('failed')).length, 0);
-  assert.equal(nodes(view.renderer, result('copied')).length, 0);
+  assert.equal(legacyBanners(view), 0, 'a late result never opens a banner again');
+  assert.equal(node(view.renderer, { 'data-fm-overlay': 'notifications' }).props['data-fm-overlay-open'], false,
+    'a late result never reopens the notification drawer');
   assert.equal(node(view.renderer, current).props.disabled, false);
 });
 
@@ -216,7 +233,7 @@ for (const operation of ['copy', 'cut']) {
     await view.click(selected);
     assert.equal(view.requests.length, before);
     assert.equal(node(view.renderer, { 'data-fm-action': 'paste' }).props.disabled, false);
-    await view.click({ 'data-fm-root': true });
+    await clickRootCrumb(view);
     await view.click({ 'data-fm-action': 'paste' });
     await view.click({ 'data-fm-action': 'paste-confirm' });
     const [task] = await view.tasks.list();
@@ -229,18 +246,19 @@ for (const operation of ['copy', 'cut']) {
   });
 }
 
-test('without roots both copy actions are disabled', async t => {
+test('without a root both copy actions are disabled', async t => {
   const copied = [];
   const view = await setup(t, { window: browser(async text => { copied.push(text); }), intercept: async (url, init, route) => {
     const response = await route(url, init);
     if (init.body && JSON.parse(init.body).op === 'bootstrap') {
       const body = await response.json();
-      body.value.roots = [];
+      body.value.root = null;
       return Response.json(body);
     }
     return response;
   } });
-  assert.equal(nodes(view.renderer, { 'data-fm-notice-dismiss': 'error' }).length, 0, 'bootstrap must succeed, not merely leave controls disabled after an error');
+  assert.equal(legacyBanners(view), 0, 'bootstrap must succeed, not merely leave controls disabled after an error');
+  assert.equal(nodes(view.renderer, { 'data-fm-no-root': 'unavailable' }).length, 1, 'the panel states that this Host has no browsable directory');
   assert.equal(node(view.renderer, current).props.disabled, true);
   assert.equal(node(view.renderer, selected).props.disabled, true);
   await view.click(current);
@@ -258,7 +276,7 @@ test('manual fallback in the shipped DOM retains literal text and selects it on 
   const rootPath = '/work/中文 "<script>" & spaced';
   const fetch = async (url, init) => {
     const op = init.body ? JSON.parse(init.body).op : '';
-    if (op === 'bootstrap') return Response.json({ ok: true, value: { roots: [{ id: 'root', path: rootPath, label: 'root' }], workspaces: [], capabilities: {}, limits: {} } });
+    if (op === 'bootstrap') return Response.json({ ok: true, value: { root: { id: 'root', path: rootPath, label: 'root', identity: '1:2' }, capabilities: {}, limits: {} } });
     if (op === 'entries.list') return Response.json({ ok: true, value: { rootId: 'root', path: '', entries: [], total: 0, nextCursor: null, unaddressable: [] } });
     throw new Error(`Unexpected request: ${url} ${op}`);
   };

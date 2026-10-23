@@ -7,7 +7,10 @@
  *  - a permanent deletion needs a reviewed server manifest, an explicit
  *    acknowledgement and a second confirmation;
  *  - a dialog belongs to one attempt: a cancelled or replaced attempt can never
- *    reopen itself or submit anything when a late response arrives.
+ *    reopen itself or submit anything when a late response arrives;
+ *  - the name dialog may offer the reviewed compatible rename, but only while its
+ *    own attempt's refusal authorized it, and that acknowledgement never outlives
+ *    the attempt it was given for.
  */
 
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from 'react';
@@ -34,14 +37,6 @@ export interface DeleteAttempt {
   error: unknown;
   targets: { rootId: string; path: string }[];
   controller: AbortController;
-}
-
-export interface RootRemovalAttempt {
-  id: string;
-  phase: 'ready' | 'failed' | 'committing';
-  requestId: string;
-  root: { id: string; label: string; path: string };
-  error: unknown;
 }
 
 export interface PasteItem {
@@ -108,13 +103,32 @@ function Actions({ children }: { children: ReactNode }): ReactNode {
   return <div className="fm-dialog-actions">{children}</div>;
 }
 
-export function NameDialog({ t, ui, busy, errorText, error, kind, value, onCancel, onChange, onSubmit }: DialogContext & {
+/**
+ * The one reviewed downgrade the Host can authorize, as this dialog presents it.
+ *
+ * It exists only when the dialog's own rename *request* was refused with
+ * `UNSUPPORTED_ATOMIC_RENAME` *and* the Host marked that refusal as
+ * compatibility-capable, so the panel passes `compatibility: null` for every
+ * create, for every other failure, and for a later failure of a rename that had
+ * already committed. `acknowledged` belongs to one submission: the caller clears
+ * it when that submission starts, and the primary action is never gated on it —
+ * the compatibility control is a separate button, and Enter submits strictly.
+ */
+export interface NameCompatibility {
+  readonly acknowledged: boolean;
+  readonly onAcknowledge: (acknowledged: boolean) => void;
+  readonly onSubmit: () => void;
+}
+
+export function NameDialog({ t, ui, busy, errorText, error, kind, value, onCancel, onChange, onSubmit, compatibility }: DialogContext & {
   error: unknown;
   kind: 'file' | 'directory' | 'rename';
   value: string;
   onCancel: () => void;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  /** `null` unless this attempt's own rename request was refused with the reviewed marker. */
+  compatibility: NameCompatibility | null;
 }): ReactNode {
   const title = kind === 'rename' ? 'rename' : kind === 'directory' ? 'newDirectory' : 'newFile';
   return (
@@ -126,7 +140,12 @@ export function NameDialog({ t, ui, busy, errorText, error, kind, value, onCance
       closeLabel={t('close')}
       description={t('nameDescription')}
       footer={<Actions>
-        {dialogButton({ t, ui }, 'cancel', { disabled: busy, onClick: onCancel })}
+        {dialogButton({ t, ui }, 'cancel', { disabled: busy, onClick: onCancel, 'data-fm-action': 'name-cancel' })}
+        {compatibility ? dialogButton({ t, ui }, 'renameCompatibilitySubmit', {
+          variant: 'outline',
+          disabled: busy || !compatibility.acknowledged,
+          onClick: compatibility.onSubmit, 'data-fm-action': 'rename-compatibility',
+        }) : null}
         {dialogButton({ t, ui }, 'applyName', { variant: 'primary', disabled: busy || !value, onClick: onSubmit, 'data-fm-action': 'name-submit' })}
       </Actions>}
     >
@@ -140,34 +159,20 @@ export function NameDialog({ t, ui, busy, errorText, error, kind, value, onCance
           />
         </label>
         {error ? <div role="alert">{errorText(error)}</div> : null}
-      </div>
-    </ui.Modal>
-  );
-}
-
-export function RootRemovalDialog({ t, ui, busy, errorText, attempt, onCancel, onConfirm }: DialogContext & {
-  attempt: RootRemovalAttempt | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}): ReactNode {
-  if (!attempt) return null;
-  return (
-    <ui.Modal
-      contentClassName="dsh-fm-dialog"
-      open
-      onClose={onCancel}
-      title={t('removeRootTitle')}
-      closeLabel={t('close')}
-      description={t('removeRootDescription')}
-      footer={<Actions>
-        {dialogButton({ t, ui }, 'cancel', { disabled: attempt.phase === 'committing', onClick: onCancel, 'data-fm-action': 'remove-root-cancel' })}
-        {dialogButton({ t, ui }, 'removeRootConfirm', { variant: 'primary', disabled: attempt.phase === 'committing' || busy, onClick: onConfirm, 'data-fm-action': 'remove-root-confirm' })}
-      </Actions>}
-    >
-      <div className="fm-dialog-content">
-        <p data-fm-remove-root-preview style={{ overflowWrap: 'anywhere' }}>{attempt.root.path}</p>
-        {attempt.phase === 'committing' ? <p role="status">{t('removeRootWorking')}</p> : null}
-        {attempt.error ? <div role="alert">{errorText(attempt.error)}</div> : null}
+        {/* A statement of the risk, not a second dialog: the reviewed downgrade is
+            the same attempt, so it stays where the name is typed. */}
+        {compatibility ? (
+          <div className="fm-notice fm-rename-compatibility" role="group" aria-label={t('renameCompatibilityTitle')} data-fm-rename-compatibility>
+            <strong>{t('renameCompatibilityTitle')}</strong>
+            <p>{t('renameCompatibilityRisk')}</p>
+            <ui.Checkbox
+              checked={compatibility.acknowledged}
+              onChange={compatibility.onAcknowledge}
+              label={t('renameCompatibilityAck')}
+              disabled={busy}
+            />
+          </div>
+        ) : null}
       </div>
     </ui.Modal>
   );

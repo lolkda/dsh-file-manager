@@ -21,12 +21,13 @@ import {
   SMALL_BODY_ADMISSION, LARGE_BODY_ADMISSION, type LimitName, type ProfileLimits,
 } from './limits.js';
 import {
-  AbsoluteRootPathSchema, ActivityReceiptSchema, DegradedViewSchema, DeleteCommitResultSchema, DeletePlanSchema,
+  ActivityReceiptSchema, DegradedViewSchema, DeleteCommitResultSchema, DeletePlanSchema,
   EchoedVersionSchema, EntryChildPathSchema, EntryPathSchema, EntrySnapshotSchema, EntryStatSchema,
   EpochMillisSchema, IsoTimestampSchema, LeafNameSchema, NonNegativeIntegerSchema, PublicErrorSchema,
   PublicTaskViewSchema, PublicTransferViewSchema, RequestIdSchema, RootDescriptorSchema, RootIdSchema,
-  RootPathRefSchema, TaskProgressSchema, TaskStatusSchema, TextReceiptSchema, TextSnapshotSchema,
-  TransferPathSchema, UnaddressableEntrySchema, UploadConflictSchema, WorkspaceCandidateSchema,
+  RootPathRefSchema, TaskProgressSchema, TaskStatusSchema,
+  TextReceiptSchema, TextSnapshotSchema,
+  TransferPathSchema, UnaddressableEntrySchema, UploadConflictSchema,
 } from './views.js';
 
 /**
@@ -38,11 +39,12 @@ import {
  */
 export type {
   ActivityDismissedReceipt, ActivityKind, ActivityReceipt, ActivityRejectedReceipt,
-  ContentVersion, DegradedOperations, DegradedRoots, DegradedView,
+  ContentVersion, DegradedFilesystem, DegradedOperations, DegradedView,
   DeleteCommitResult, DeletePlan, EntryKind, EntrySnapshot, EntryStat, EntryVersion,
   JsonValue, MetadataVersion, NewlineStyle, PublicEntrySummary, PublicError, PublicTaskItem,
-  PublicTaskView, PublicTransferItem, PublicTransferView, RootDescriptor, RootPathRef, TaskItemStatus,
-  TaskProgress, TaskStatus, TextReceipt, TextSnapshot, UnaddressableEntry, WorkspaceCandidate,
+  PublicTaskView, PublicTransferItem, PublicTransferView, RootDescriptor, RootPathRef,
+  TaskItemStatus,
+  TaskProgress, TaskStatus, TextReceipt, TextSnapshot, UnaddressableEntry,
 } from './views.js';
 export type { TaskConflictPolicy, UploadConflictPolicy } from './limits.js';
 
@@ -53,9 +55,6 @@ export type { TaskConflictPolicy, UploadConflictPolicy } from './limits.js';
 /** Every control operation the Host dispatches, in dispatch order. */
 export const CONTROL_OPS = [
   'bootstrap',
-  'roots.list',
-  'roots.add',
-  'roots.remove',
   'entries.list',
   'entries.stat',
   'entries.reference',
@@ -85,8 +84,6 @@ export type ControlOp = (typeof CONTROL_OPS)[number];
  * fingerprint is `REQUEST_ID_REUSED` / 409.
  */
 export const MUTATION_OPS = [
-  'roots.add',
-  'roots.remove',
   'entries.create-file',
   'entries.create-directory',
   'entries.rename',
@@ -135,7 +132,6 @@ export type ResponseEnvelope = z.infer<typeof ResponseEnvelopeSchema>;
 
 export const CapabilitiesSchema = z.object({
   write: z.boolean(),
-  persistentRoots: z.boolean(),
   tasks: z.boolean(),
   transfers: z.boolean(),
   watch: z.boolean(),
@@ -169,8 +165,11 @@ export function publicLimitsOf(limits: PublicLimits): ProfileLimits {
 export const PUBLIC_LIMIT_NAMES: readonly LimitName[] = Object.freeze([...LIMIT_NAMES]);
 
 export const BootstrapViewSchema = z.object({
-  roots: z.array(RootDescriptorSchema),
-  workspaces: z.array(WorkspaceCandidateSchema),
+  /**
+   * The one browsable root, or `null` when the Host could not open it: there is
+   * no grant list to choose from and no way to add one.
+   */
+  root: RootDescriptorSchema.nullable(),
   /** Must equal the installed package version. */
   version: z.string().min(1),
   stage: z.literal('basic-management'),
@@ -188,36 +187,13 @@ export type BootstrapView = z.infer<typeof BootstrapViewSchema>;
 export const BootstrapRequestSchema = z.object({ op: z.literal('bootstrap'), ...readEnvelope });
 
 /* ------------------------------------------------------------------ *
- * Roots
- * ------------------------------------------------------------------ */
-
-export const RootsListRequestSchema = z.object({ op: z.literal('roots.list'), ...readEnvelope });
-export const RootsListResultSchema = z.array(RootDescriptorSchema);
-
-export const RootsAddRequestSchema = z.object({
-  op: z.literal('roots.add'),
-  /** The only operation that accepts an absolute path. */
-  path: AbsoluteRootPathSchema,
-  ...mutationEnvelope,
-});
-export const RootsAddResultSchema = RootDescriptorSchema;
-
-export const RootsRemoveRequestSchema = z.object({
-  op: z.literal('roots.remove'),
-  rootId: RootIdSchema,
-  ...mutationEnvelope,
-});
-/** Removing a grant never deletes disk data and never revokes by accident. */
-export const RootsRemoveResultSchema = z.object({ rootId: RootIdSchema, removed: z.literal(true) }).strict();
-
-/* ------------------------------------------------------------------ *
  * Entries
  * ------------------------------------------------------------------ */
 
 export const EntriesListRequestSchema = z.object({
   op: z.literal('entries.list'),
   rootId: RootIdSchema,
-  /** Defaults to the granted root. */
+  /** Defaults to the root itself. */
   path: EntryPathSchema.optional(),
   /** Defaults to 200; the Host rejects anything outside 1..500. */
   limit: z.number().int().min(1).max(500).optional(),
@@ -291,6 +267,15 @@ export const EntriesRenameRequestSchema = z.object({
    * `VERSION_CONFLICT` / 409; neither ever becomes an unchecked rename.
    */
   expectedVersion: EchoedVersionSchema.optional(),
+  /**
+   * The one per-request authorization to accept the weaker guarantee of an
+   * ordinary rename. Absent or `false` keeps the strict contract, and the atomic
+   * helper is still attempted first even when it is `true`: only a helper that
+   * proves the filesystem cannot enforce no-replace may be downgraded, and only
+   * after the parent, the source version and an absent destination are re-proved.
+   * This is not an overwrite permission and not a version-check bypass.
+   */
+  allowNonExclusiveRename: z.boolean().optional(),
   ...mutationEnvelope,
 });
 export const EntriesRenameResultSchema = EntryStatSchema;
@@ -448,9 +433,6 @@ export const TransfersRetryResultSchema = PublicTransferViewSchema;
 
 export const ControlRequestSchema = z.discriminatedUnion('op', [
   BootstrapRequestSchema,
-  RootsListRequestSchema,
-  RootsAddRequestSchema,
-  RootsRemoveRequestSchema,
   EntriesListRequestSchema,
   EntriesStatRequestSchema,
   EntriesReferenceRequestSchema,
@@ -491,9 +473,6 @@ export type TextRequest = z.infer<typeof TextRequestSchema>;
  */
 export const CONTROL_RESULTS = {
   bootstrap: BootstrapViewSchema,
-  'roots.list': RootsListResultSchema,
-  'roots.add': RootsAddResultSchema,
-  'roots.remove': RootsRemoveResultSchema,
   'entries.list': EntriesListResultSchema,
   'entries.stat': EntriesStatResultSchema,
   'entries.reference': EntriesReferenceResultSchema,

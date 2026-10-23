@@ -3,6 +3,15 @@
  *
  * It orchestrates: bootstrap, directory browsing, document editing, tasks and
  * transfers, references and the dialogs. Behavioural rules it must keep:
+ *  - the Host has exactly one root, fixed when the Host started. There is nothing
+ *    to add, choose, remove or re-authorize here, so this panel holds no such
+ *    state — and when the Host has no usable root it says so instead of offering
+ *    a way to create one;
+ *  - the *location inside* that root survives a remount only while the root id
+ *    is unchanged. A changed id means a different directory, so the relative
+ *    path, its listing and its selection are dropped, open drafts keep their
+ *    text but are marked unavailable, and a clipboard naming the old root is
+ *    cleared — nothing is re-bound to the new root;
  *  - switching main panels never discards an unsaved draft (the document store is
  *    root-owned and outlives this component);
  *  - a background refresh, a failed save or a deleted file never overwrites a
@@ -16,25 +25,27 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { EntrySnapshot, EntryStat, EntryVersion } from '../contracts/views.js';
-import type { Translate } from './i18n.js';
-import { createApi, isMissingFailure, type Api } from './api.js';
+import type { EntrySnapshot, EntryStat, EntryVersion, RootDescriptor } from '../contracts/views.js';
+import { failureCode, type Translate } from './i18n.js';
+import { createApi, failureCodeOf, isMissingFailure, type Api } from './api.js';
 import type { ActivityStore } from './activity.js';
 import { activityCounts, canDismissActivity, isActivityRunning } from './activity.js';
 import type { DocumentStore, OpenDocument } from './documents.js';
 import { AttemptSlot, type UiPrimitives } from './ui.js';
 import { CodeEditor } from './code-editor.js';
 import { PANEL_CSS } from './styles.js';
-import { Notice } from './notice.js';
+import { Overlay } from './overlay.js';
+import type { NotificationAction, NotificationEntry, NotificationInput, NotificationLevel, NotificationStore } from './notifications.js';
+import { NotificationButton, NotificationDrawer, NotificationLiveRegion } from './notification-center.js';
 import {
   EMPTY_LISTING, FileSection, applyPage, type FileActions, type FileCapabilities,
   type ListingPage, type ListingState, type UnaddressableEntry,
 } from './browser.js';
 import {
-  CloseDialog, ConflictDialog, DeleteDialog, DownloadDialog, NameDialog, PasteDialog, ReferenceDialog,
-  RootRemovalDialog, UploadDialog, type DeleteAttempt, type PastePlan, type RootRemovalAttempt, type UploadGroup, type UploadPlan, type UploadSource,
+  CloseDialog, ConflictDialog, DeleteDialog, DownloadDialog, NameDialog, PasteDialog, ReferenceDialog, UploadDialog,
+  type DeleteAttempt, type PastePlan, type UploadGroup, type UploadPlan, type UploadSource,
 } from './dialogs.js';
-import { startWatch, type WatchStatus } from './watch.js';
+import { startWatch } from './watch.js';
 import type { ReferenceScope } from './reference.js';
 
 export interface PanelRuntime {
@@ -68,6 +79,18 @@ export interface PanelProps {
   readonly activity: ActivityStore<Record<string, never> & { id: string; status: string; updatedAt: number }>;
   readonly ui: UiPrimitives;
   readonly runtime: PanelRuntime;
+  /**
+   * The plugin-owned notification store. It outlives this view, so an operation
+   * the user confirmed can still report its outcome after the panel unmounts.
+   */
+  readonly notifications: NotificationStore;
+  /**
+   * Reports a record this panel just created *before* it is published to the
+   * activity store, so a terminal outcome the user is already looking at is
+   * announced once, with the action's own wording, instead of being re-derived by
+   * the observer. Non-terminal records return `null`.
+   */
+  readonly reportTerminal: (kind: 'task' | 'transfer', record: { readonly id: string; readonly status: string }, options?: { readonly code?: string; readonly message?: string }) => string | null;
   readonly useSessions?: ((selector: (value: SessionCatalog) => SessionCatalog) => SessionCatalog) | undefined;
 }
 
@@ -84,46 +107,67 @@ function useNoSessions(selector: (value: SessionCatalog) => SessionCatalog): Ses
 }
 
 export function Panel(props: PanelProps): ReactNode {
-  const { t, documents, activity, ui, runtime } = props;
+  const { t, documents, activity, ui, runtime, notifications, reportTerminal } = props;
   const { Button } = ui;
   const useSessions = props.useSessions ?? useNoSessions;
   const sessionCatalog = useSessions(value => value);
   const activities = useSyncExternalStore(activity.subscribe, activity.getSnapshot, activity.getSnapshot);
   const documentState = useSyncExternalStore(documents.subscribe, documents.getSnapshot, documents.getSnapshot);
+  const notificationState = useSyncExternalStore(notifications.subscribe, notifications.getSnapshot, notifications.getSnapshot);
   const active = documentState.documents.find(item => item.id === documentState.activeId);
   const sessionOptions = sessionCatalog.ids
     .map(id => sessionCatalog.byId[id])
     .filter((session): session is NonNullable<typeof session> => Boolean(session) && !session?.parentId && session?.origin !== 'subagent');
 
-  const [roots, setRoots] = useState<{ id: string; label: string; path: string }[]>([]);
-  const [workspaces, setWorkspaces] = useState<{ id: string; path: string; title: string }[]>([]);
-  const [capabilities, setCapabilities] = useState<FileCapabilities & { watch?: boolean; taskHistory?: boolean; persistentRoots?: boolean }>({});
+  /**
+   * The Host's single root, as bootstrap reported it. `null` means the Host has
+   * no usable root: the panel then says so and offers no way to create one.
+   */
+  const [root, setRoot] = useState<RootDescriptor | null>(null);
+  const [capabilities, setCapabilities] = useState<FileCapabilities & { watch?: boolean; taskHistory?: boolean }>({});
   const [limits, setLimits] = useState<{ maxTextBytes?: number; maxFileBytes?: number; maxTaskBytes?: number; maxTaskEntries?: number; transferConcurrency?: number }>({});
   /** Read-only degradation: why writes and/or history are unavailable. */
   const [degraded, setDegraded] = useState<{ scope: string; code: string; message: string; readOnly: boolean } | null>(null);
-  const [rootId, setRootId] = useState(runtime.location.rootId);
   const [directory, setDirectory] = useState(runtime.location.path);
   const [listing, setListing] = useState<ListingState>(EMPTY_LISTING);
   const [selected, setSelected] = useState('');
   const [selection, setSelection] = useState<string[]>([]);
   const [nameDialog, setNameDialog] = useState<{ kind: 'file' | 'directory' | 'rename'; rootId: string; directory: string; entry: EntryStat | null } | null>(null);
   const [nameInput, setNameInput] = useState('');
+  /**
+   * What the name dialog's own submission must show, and — kept apart — the
+   * refusal that a compatible rename alone may resolve.
+   *
+   * `nameFailure` is the error this dialog is showing: every step of its
+   * submission writes it, including a failure *after* a committed rename.
+   * `nameRefusal` is written only by the `entries.rename` request itself, so no
+   * later failure — not even one that repeats the same code — can open the
+   * compatibility entry. `nameCompatibility` is the acknowledgement given for one
+   * submission; it is cleared when that submission starts, on an edit, on cancel
+   * and after every outcome. None of the three is the shared `error` slot, so
+   * another action's failure can never reach this dialog, and this dialog's
+   * failure can never reach another one.
+   */
+  const [nameFailure, setNameFailure] = useState<unknown>(null);
+  const [nameRefusal, setNameRefusal] = useState<unknown>(null);
+  const [nameCompatibility, setNameCompatibility] = useState(false);
   const [deleteDialog, setDeleteDialog] = useState<DeleteAttempt | null>(null);
-  const [rootRemoval, setRootRemoval] = useState<RootRemovalAttempt | null>(null);
-  const [operationResult, setOperationResult] = useState<{ status: string; results: { rootId: string; path: string; status: string; removed?: boolean | undefined; error?: { code?: string } | undefined }[] } | null>(null);
+  /**
+   * The notification drawer is a peer overlay, not one of the `surface` values:
+   * opening it must not replace the directory, viewer or tasks view behind it.
+   */
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [pastePlan, setPastePlan] = useState<PastePlan | null>(null);
   const [uploadPlan, setUploadPlan] = useState<UploadPlan | null>(null);
   const [download, setDownload] = useState<{ id: string; downloadName?: string | null } | null>(null);
   const [referencePlan, setReferencePlan] = useState<{ mention: string }[] | null>(null);
   const [referenceSession, setReferenceSession] = useState('');
-  const [directoryFallback, setDirectoryFallback] = useState(false);
-  const [dismissedClipboard, setDismissedClipboard] = useState<unknown>(null);
-  const [watchStatus, setWatchStatus] = useState<WatchStatus>('connecting');
-  const [pathInput, setPathInput] = useState('/');
   const [busy, setBusy] = useState(0);
   const [error, setError] = useState<unknown>(null);
   const [closeId, setCloseId] = useState<string | null>(null);
   const [conflictId, setConflictId] = useState<string | null>(null);
+  const [surface, setSurface] = useState<'viewer' | 'tasks' | null>(null);
+  const [fileAttempt, setFileAttempt] = useState<{ rootId: string; path: string; loading: boolean; error: unknown } | null>(null);
 
   const alive = useRef(false);
   const lifetime = useRef<AbortController | null>(null);
@@ -132,8 +176,14 @@ export function Panel(props: PanelProps): ReactNode {
   const interactionBusy = useRef(0);
   const uploadInput = useRef<HTMLInputElement>(null);
   const directoryInput = useRef<HTMLInputElement>(null);
+  /** The viewer header, for moving focus off a tab button that is about to be removed. */
+  const viewerHeader = useRef<HTMLDivElement>(null);
   const deleteAttempt = useRef(new AttemptSlot<DeleteAttempt>());
-  const rootRemovalAttempt = useRef(new AttemptSlot<RootRemovalAttempt>());
+  /**
+   * Set synchronously by the name dialog's submit, so two clicks in one tick
+   * cannot both pass a `busy` value React has not re-rendered yet.
+   */
+  const nameSubmitting = useRef(false);
   /** Latest listing, so two appends in one frame never reuse the same cursor. */
   const listingRef = useRef<ListingState>(EMPTY_LISTING);
   /**
@@ -150,13 +200,33 @@ export function Panel(props: PanelProps): ReactNode {
   interactionBusy.current = busy;
   interactionRef.current = busy;
 
+  useEffect(() => {
+    if (surface === 'viewer' && !active && !fileAttempt) setSurface(null);
+  }, [surface, active, fileAttempt]);
+
+  /**
+   * Reading the drawer is what marks records read: opening it — or leaving it open
+   * while new events arrive — consumes the unread count without any request. The
+   * guard on `unreadCount` is what keeps this bounded: once nothing is unread the
+   * effect stops calling into the store, so no render loop can form.
+   */
+  useEffect(() => {
+    if (!notificationsOpen || notificationState.unreadCount === 0) return;
+    notifications.markRead();
+  }, [notificationsOpen, notificationState, notifications]);
+
   const api = useMemo<Api>(() => createApi({
     persistentSignal: () => runtime.controller.signal,
     viewSignal: () => lifetime.current?.signal,
   }), [runtime]);
   apiRef.current = api;
 
-  const root = roots.find(item => item.id === rootId);
+  /**
+   * The one root id every request in this view is addressed to. Empty means the
+   * Host has no usable root: nothing is requested, and the file list says so
+   * rather than inviting the user to add a directory that cannot exist.
+   */
+  const rootId = root?.id ?? '';
   const selectedEntries = listing.entries.filter(item => selection.includes(item.path));
   const selectionSaving = documentState.documents.some(document => document.saving && document.rootId === rootId && selectedEntries.some(entry => document.path === entry.path || document.path.startsWith(`${entry.path}/`)));
   const closing = documentState.documents.find(item => item.id === closeId) ?? null;
@@ -171,9 +241,80 @@ export function Panel(props: PanelProps): ReactNode {
   const button = (label: string, attributes: Record<string, unknown> = {}): ReactNode =>
     <Button variant="ghost" size="sm" type="button" {...attributes}>{t(label)}</Button>;
 
+  /**
+   * The one refusal the UI may resolve with the plain rename.
+   *
+   * The code alone is not enough: a helper that cannot be started and a permission
+   * failure are reported with `UNSUPPORTED_ATOMIC_RENAME` but carry no marker, an
+   * unconfirmed outcome is `ATOMIC_RENAME_UNCERTAIN` and is out of scope entirely,
+   * and the Host marks only a filesystem that provably cannot do a no-replace
+   * rename. This answers about the request it is given — never about a later step
+   * of the same submission, and never from memory.
+   */
+  const allowsNonExclusiveRename = (failure: unknown): boolean => {
+    if (failureCodeOf(failure) !== 'UNSUPPORTED_ATOMIC_RENAME') return false;
+    const details = typeof failure === 'object' && failure !== null ? (failure as { details?: unknown }).details : undefined;
+    return typeof details === 'object' && details !== null && (details as { compatibilityAvailable?: unknown }).compatibilityAvailable === true;
+  };
+  /** One name attempt owns its failure, its refusal and its acknowledgement; none is inherited. */
+  const discardNameAttempt = (): void => { setNameFailure(null); setNameRefusal(null); setNameCompatibility(false); };
+
   function commitListing(next: ListingState): void {
     listingRef.current = next;
     setListing(next);
+  }
+
+  /**
+   * Publishes one event. The store is plugin-owned, so this keeps working after
+   * this view unmounts. Only plain data travels: already-translated text, a typed
+   * navigation target and the text to copy — never a callback or a live node.
+   */
+  function notify(input: NotificationInput): void {
+    notifications.publish(input);
+  }
+
+  /**
+   * Reports a failed user action.
+   *
+   * A cancel is not a failure, and nothing here is deduplicated by code: doing the
+   * same thing again must produce its own record. Only state-shaped sources pass a
+   * `dedupeKey`, which is what keeps a repeating watcher or poll from filling the
+   * history.
+   */
+  function notifyFailure(failure: unknown, options: { code?: string; dedupeKey?: string; title?: string; level?: NotificationLevel } = {}): void {
+    // `failureCode` maps an aborted request to CANCELLED: a user cancel is not a
+    // failure, and the numeric DOMException code would otherwise look like one.
+    const reported = failureCode(failure);
+    if (reported === 'CANCELLED') return;
+    const code = options.code ?? reported ?? undefined;
+    notify({
+      level: options.level ?? 'error',
+      title: options.title ?? errorText(failure),
+      ...(code ? { code } : {}),
+      ...(options.dedupeKey ? { dedupeKey: options.dedupeKey } : {}),
+    });
+  }
+
+  /**
+   * A transfer failure belongs in the history once per task and code: the upload
+   * worker reports item by item, and one task must not fill the list with its own
+   * rows. It is reported whether or not this view is still alive, because the
+   * transfer the user started keeps running either way.
+   */
+  function notifyTransferFailure(taskId: string, failure: unknown): void {
+    notifyFailure(failure, { dedupeKey: `transfer:${taskId}:${failureCode(failure) ?? 'TRANSPORT'}` });
+  }
+
+  /** One record per finished operation, carrying the per-target outcomes. */
+  function notifyOperationResult(result: { status: string; results: readonly { path: string; status: string; error?: { code?: string } | undefined }[] }): void {
+    notify({
+      level: result.status === 'completed' ? 'success' : result.status === 'partial' ? 'warning' : 'error',
+      title: `${t('operationResult')}: ${t(`status.${result.status}`)}`,
+      ...(result.results.length
+        ? { details: result.results.map(item => `${item.path}: ${t(`status.${item.status}`)}${item.error ? ` · ${errorText(item.error)}` : ''}`) }
+        : {}),
+      code: 'OPERATION_RESULT',
+    });
   }
 
   async function run<T>(operation: () => Promise<T>): Promise<T | undefined> {
@@ -183,6 +324,14 @@ export function Panel(props: PanelProps): ReactNode {
     try {
       return await operation();
     } catch (failure) {
+      // The event record is independent of this view's lifetime: a request the user
+      // confirmed keeps its outcome even when the panel is gone, so a failure that
+      // lands after unmount is still reported. A plugin teardown (the runtime
+      // signal is aborted) and a user cancel are not failures at all.
+      const ownedByDialog = alive.current && nestedDialog;
+      if (!ownedByDialog && failureCode(failure) !== 'CANCELLED' && !runtime.controller.signal.aborted) notifyFailure(failure);
+      // The inline error stays bound to the live view: a dialog that is gone cannot
+      // show it, and a late response must never write into a newer view's state.
       if (alive.current && lifetime.current?.signal.aborted !== true) setError(failure);
       return undefined;
     } finally {
@@ -190,7 +339,14 @@ export function Panel(props: PanelProps): ReactNode {
     }
   }
 
-  async function listAt(id: string, relative: string, append = false, preserveSelection = false): Promise<void> {
+  /**
+   * Lists one directory of the single root.
+   *
+   * `recoverSavedDirectory` belongs to the startup listing only: a saved
+   * directory that no longer exists is then opened as the root. Every other
+   * failure — and every other listing — is reported as it is.
+   */
+  async function listAt(id: string, relative: string, append = false, preserveSelection = false, recoverSavedDirectory = false): Promise<void> {
     // A request without a root cannot be answered and must not consume a ticket:
     // bumping the generation here would cancel the page already in flight.
     if (!id) return;
@@ -201,6 +357,8 @@ export function Panel(props: PanelProps): ReactNode {
     const ticket = append ? generation.current : ++generation.current;
     const cursor = append ? listingRef.current.nextCursor : null;
     if (append) appendPending.current = true;
+    /** The lifetime this request belongs to; a late answer must not navigate. */
+    const asked = lifetime.current?.signal;
     try {
       const value = await api.control({ op: 'entries.list', rootId: id, path: relative, ...(cursor ? { cursor } : {}) });
       if (!alive.current || ticket !== generation.current) return;
@@ -212,7 +370,6 @@ export function Panel(props: PanelProps): ReactNode {
         nextCursor: value.nextCursor,
         unaddressable: (value.unaddressable ?? []) as readonly UnaddressableEntry[],
       };
-      setRootId(id);
       setDirectory(relative);
       runtime.location = { rootId: id, path: relative };
       locationRef.current = { rootId: id, path: relative };
@@ -221,6 +378,16 @@ export function Panel(props: PanelProps): ReactNode {
         if (preserveSelection) setSelection(previous => previous.filter(filename => value.entries.some(entry => entry.path === filename)));
         else { setSelected(''); setSelection([]); }
       }
+    } catch (failure) {
+      // The fallback is bounded by this request still being the live one: a late
+      // NOT_FOUND from a view that unmounted, from a replaced lifetime, or from a
+      // listing the user has already navigated away from must not move the panel.
+      if (recoverSavedDirectory && relative !== '' && failureCodeOf(failure) === 'NOT_FOUND'
+        && alive.current && ticket === generation.current && asked === lifetime.current?.signal) {
+        await listAt(id, '');
+        return;
+      }
+      throw failure;
     } finally {
       if (append) appendPending.current = false;
     }
@@ -246,6 +413,45 @@ export function Panel(props: PanelProps): ReactNode {
     }
   }
 
+  /**
+   * Adopts the Host's single root and opens the best location inside it.
+   *
+   * A relative path only means anything against the same root id. When the id
+   * changed, the old location, listing and selection describe entries that are
+   * gone, so they are dropped before the first request; drafts keep their text
+   * and are only marked unavailable, and the clipboard is dropped only when it
+   * names another root. Nothing is re-bound to the new root.
+   */
+  async function applyRoot(descriptor: RootDescriptor | null): Promise<void> {
+    if (!descriptor) return;
+    const stale = new Set<string>();
+    for (const document of documents.getSnapshot().documents) {
+      if (document.rootId && document.rootId !== descriptor.id) stale.add(document.rootId);
+    }
+    for (const id of stale) documents.markMissing(id, '');
+    // The clipboard is judged against the root itself, not against the open
+    // drafts: an item naming any other root id can no longer be pasted here.
+    const clipboard = activity.getSnapshot().clipboard;
+    if (clipboard?.items.some(item => item.rootId !== descriptor.id)) activity.clipboard(null);
+    const before = locationRef.current;
+    const changed = before.rootId !== descriptor.id;
+    if (changed) {
+      // Retire the old location before the first request, so a listing that fails
+      // cannot leave the new root rendered with the old relative path.
+      generation.current++;
+      setDirectory('');
+      commitListing(EMPTY_LISTING);
+      setSelected('');
+      setSelection([]);
+      locationRef.current = { rootId: descriptor.id, path: '' };
+      runtime.location = { rootId: descriptor.id, path: '' };
+    }
+    const path = changed ? '' : before.path;
+    // The startup listing is the only one allowed to recover a saved directory
+    // that has since been removed; it is the only request the user did not ask for.
+    await listAt(descriptor.id, path, false, false, true);
+  }
+
   const openDirectory = (id: string, relative: string, append = false): void => { void run(() => listAt(id, relative, append)); };
   const refresh = (): void => { void run(async () => { await listAt(rootId, directory); await refreshDocuments(rootId); }); };
   const loadMore = (): void => {
@@ -253,14 +459,45 @@ export function Panel(props: PanelProps): ReactNode {
     openDirectory(rootId, directory, true);
   };
 
-  const openFile = (entry: EntrySnapshot): void => { void run(async () => {
+  const openFile = (entry: EntrySnapshot): void => {
     const ticket = ++fileGeneration.current;
+    const target = { rootId, path: entry.path };
     setSelected(entry.path);
-    const existing = documents.getSnapshot().documents.find(item => item.rootId === rootId && item.path === entry.path);
-    if (existing) documents.activate(existing.id);
-    const value = await api.control({ op: 'text.read', rootId, path: entry.path });
-    if (alive.current && ticket === fileGeneration.current) documents.open(value);
-  }); };
+    setSurface('viewer');
+    setFileAttempt({ ...target, loading: true, error: null });
+    void run(async () => {
+      const existing = documents.getSnapshot().documents.find(item => item.rootId === target.rootId && item.path === target.path);
+      if (existing) documents.activate(existing.id);
+      try {
+        const value = await api.control({ op: 'text.read', ...target });
+        if (alive.current && ticket === fileGeneration.current) {
+          documents.open(value);
+          setFileAttempt(null);
+        }
+      } catch (failure) {
+        if (alive.current && ticket === fileGeneration.current) setFileAttempt({ ...target, loading: false, error: failure });
+      }
+    });
+  };
+  const resumeViewer = (): void => {
+    fileGeneration.current++;
+    setFileAttempt(null);
+    setSurface('viewer');
+  };
+
+  /**
+   * The window X hides the editing surface only: every document, draft and the
+   * mounted editor instance survive, and a save already running keeps running.
+   * The read-generation bump invalidates the current open attempt, so a late
+   * `text.read` response can neither add a document nor bring this window back;
+   * clearing the attempt keeps a stale loading/failed state from being restored
+   * on resume. Back-to-files and Escape keep their hide-only semantics.
+   */
+  const closeViewer = (): void => {
+    fileGeneration.current++;
+    setFileAttempt(null);
+    setSurface(null);
+  };
 
   async function saveDocument(id: string | null): Promise<boolean> {
     const document = findDocument(id);
@@ -287,6 +524,7 @@ export function Panel(props: PanelProps): ReactNode {
       }
       documents.saved(attempt, receipt, submitted, actual);
       saveRequests.current.delete(actionKey);
+      notify({ level: 'success', title: `${t('saved')}: ${document.path}`, code: 'DOCUMENT_SAVED' });
       return true;
     } catch (failure) {
       if (isMissingFailure(failure)) documents.markMissing(document.rootId, document.path);
@@ -310,6 +548,16 @@ export function Panel(props: PanelProps): ReactNode {
   const save = (id: string): void => { void run(() => saveDocument(id)); };
   const closeDocument = (id: string): void => {
     if (findDocument(id)?.saving) return;
+    // Closing removes the tab row that may own the focus right now. When focus
+    // sits on the tab X being closed, move it to the always-present window
+    // close button first: the browser would otherwise drop it to <body> and
+    // the viewer overlay would lose its keyboard loop. Readers without this
+    // header leave focus alone.
+    const header = viewerHeader.current;
+    const focused = header?.ownerDocument.activeElement;
+    if (focused?.closest('[data-fm-close-document]')?.getAttribute('data-fm-close-document') === id) {
+      header?.querySelector<HTMLButtonElement>('[data-fm-action="close-viewer"]')?.focus({ preventScroll: true });
+    }
     if (!documents.close(id)) setCloseId(id);
   };
   const saveAndClose = (): void => { void run(async () => {
@@ -326,21 +574,44 @@ export function Panel(props: PanelProps): ReactNode {
     void run(async () => {
       const value = await api.control({ op: 'bootstrap' });
       if (controller.signal.aborted) return;
-      setRoots(value.roots);
-      setWorkspaces(value.workspaces ?? []);
-      setCapabilities((value.capabilities ?? {}) as FileCapabilities & { watch?: boolean; taskHistory?: boolean; persistentRoots?: boolean });
+      setRoot(value.root ?? null);
+      setCapabilities((value.capabilities ?? {}) as FileCapabilities & { watch?: boolean; taskHistory?: boolean });
       setLimits((value.limits ?? {}) as typeof limits);
       setDegraded(value.degraded ?? null);
-      const previous = value.roots.find(item => item.id === runtime.location.rootId);
-      const target = previous ?? value.roots[0];
-      if (target) await listAt(target.id, previous ? runtime.location.path : '');
-      await syncActivities((value.capabilities ?? {}) as FileCapabilities);
+      // The degradation itself is business state and keeps its compact indicator;
+      // the *reason* is an event, reported once per scope and code rather than on
+      // every remount. There is no destination to offer with it: the only place
+      // that could fix a degraded Host is the Host.
+      const degradation = value.degraded;
+      if (degradation) {
+        notify({
+          level: 'error',
+          title: degradation.readOnly ? t('readOnly') : t('degraded'),
+          message: degradation.message,
+          code: degradation.code,
+          dedupeKey: `degraded:${degradation.scope}:${degradation.code}`,
+        });
+      }
+      // Opening the root is not a precondition for anything else on this page: a
+      // listing that fails is reported on its own, and the task history still
+      // synchronizes — otherwise a broken directory would also hide every task
+      // the user is waiting on.
+      try {
+        await applyRoot(value.root ?? null);
+      } catch (failure) {
+        notifyFailure(failure);
+        if (alive.current) setError(failure);
+      }
+      if (controller.signal.aborted) return;
+      // A Host that refuses every file operation would only answer 503 to the two
+      // history listings, so they are not sent; an `operations` degradation still
+      // follows the Host's own capability bits.
+      if (value.degraded?.scope !== 'filesystem') await syncActivities((value.capabilities ?? {}) as FileCapabilities);
     });
     return () => {
       alive.current = false;
       deleteAttempt.current.peek()?.controller.abort();
       deleteAttempt.current.clear();
-      rootRemovalAttempt.current.clear();
       controller.abort();
       generation.current++;
       fileGeneration.current++;
@@ -348,68 +619,6 @@ export function Panel(props: PanelProps): ReactNode {
     // Bootstrap runs once for the mounted view.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const add = (event: { preventDefault: () => void }): void => {
-    event.preventDefault();
-    void run(async () => {
-      const added = await api.control({ op: 'roots.add', requestId: api.requestId(), path: pathInput });
-      const nextRoots = await api.control({ op: 'roots.list' });
-      if (!alive.current) return;
-      setRoots(nextRoots);
-      await listAt(added.id, '');
-    });
-  };
-
-  const beginRootRemoval = (item: { id: string; label: string; path: string }): void => {
-    if (!alive.current || busy || rootRemovalAttempt.current.peek()?.phase === 'committing') return;
-    const attempt: RootRemovalAttempt = { id: api.requestId(), requestId: api.requestId(), root: item, phase: 'ready', error: null };
-    setRootRemoval({ ...rootRemovalAttempt.current.begin(attempt) });
-    setError(null);
-  };
-  const cancelRootRemoval = (id: string | undefined): void => {
-    const attempt = rootRemovalAttempt.current.peek();
-    if (!attempt || attempt.id !== id || attempt.phase === 'committing') return;
-    rootRemovalAttempt.current.clear(attempt);
-    setRootRemoval(null);
-  };
-  const confirmRootRemoval = (id: string | undefined): void => {
-    const attempt = rootRemovalAttempt.current.peek();
-    if (!alive.current || !attempt || attempt.id !== id || attempt.phase === 'committing' || busy) return;
-    rootRemovalAttempt.current.update(attempt, { phase: 'committing', error: null });
-    setRootRemoval({ ...attempt });
-    void run(async () => {
-      try {
-        await api.control({ op: 'roots.remove', requestId: attempt.requestId, rootId: attempt.root.id }, { persistent: true });
-        documents.markMissing(attempt.root.id, '');
-        const nextRoots = await api.control({ op: 'roots.list' });
-        if (!alive.current) return;
-        if (rootRemovalAttempt.current.isCurrent(attempt)) {
-          rootRemovalAttempt.current.clear(attempt);
-          setRootRemoval(null);
-        }
-        setRoots(nextRoots);
-        if (rootId === attempt.root.id) {
-          const fallback = nextRoots[0];
-          if (fallback) await listAt(fallback.id, '');
-          else {
-            generation.current++;
-            setRootId('');
-            setDirectory('');
-            runtime.location = { rootId: '', path: '' };
-            commitListing(EMPTY_LISTING);
-            setSelected('');
-            setSelection([]);
-          }
-        }
-      } catch (failure) {
-        if (alive.current && rootRemovalAttempt.current.isCurrent(attempt)) {
-          rootRemovalAttempt.current.update(attempt, { phase: 'failed', error: failure });
-          setRootRemoval({ ...attempt });
-        }
-        throw failure;
-      }
-    });
-  };
 
   type TaskView = { id: string; operation?: string; status: string; updatedAt: string | number; historyRevision?: number; dismissed?: boolean; canDismiss?: boolean; progress?: { total: number; completed: number; failed: number; skipped: number; cancelled: number; bytes: number; totalBytes: number }; items: { id: string; status: string; source: { rootId: string; path: string }; destination?: { rootId: string; path: string }; result?: { destination?: { rootId: string; path: string }; sourceRemoved?: boolean } | null; error?: { code?: string; details?: { committed?: boolean } } | null }[]; cancelRequested?: boolean };
 
@@ -429,6 +638,8 @@ export function Panel(props: PanelProps): ReactNode {
           documents.relocate(document.id, await api.control({ op: 'text.read', rootId: moved.rootId, path: moved.path }, { persistent: true }));
         } catch (failure) {
           documents.markMissing(document.rootId, document.path);
+          // Driven by task views rather than by a click: one record per code.
+          notifyFailure(failure, { dedupeKey: `task-relocation:${failureCode(failure) ?? 'TRANSPORT'}` });
           if (alive.current) setError(failure);
         }
       }
@@ -501,23 +712,32 @@ export function Panel(props: PanelProps): ReactNode {
   // A degraded Host must not present an unusable capability as usable, and an
   // unavailable history must never be rendered as "no tasks".
   //
+  // The two scopes mean different things: `operations` is a journal that cannot
+  // be written, so browsing and reading still work and only the history is
+  // missing; `filesystem` is the root itself being unusable, so every file
+  // operation — browsing, editing, tasks, transfers and references — is refused
+  // by the Host and the history cannot be listed either.
+  //
   // Every write entry point reads `allowed.write` — the editor and its edit/save
   // buttons included — so no degradation path can leave one of them offering a
   // write the others refuse.
   const degradedScope = degraded?.scope ?? null;
-  const allowed: FileCapabilities & { watch?: boolean; taskHistory?: boolean; persistentRoots?: boolean } = {
+  const rootUsable = degradedScope !== 'filesystem';
+  const allowed: FileCapabilities & { watch?: boolean; taskHistory?: boolean } = {
     ...capabilities,
     write: capabilities.write === true && degradedScope === null,
-    tasks: capabilities.tasks === true && degradedScope !== 'operations',
-    transfers: capabilities.transfers === true && degradedScope !== 'operations',
-    references: capabilities.references === true && degradedScope !== 'operations' && sessionOptions.length > 0,
+    tasks: capabilities.tasks === true && degradedScope !== 'operations' && rootUsable,
+    transfers: capabilities.transfers === true && degradedScope !== 'operations' && rootUsable,
+    references: capabilities.references === true && degradedScope !== 'operations' && rootUsable && sessionOptions.length > 0,
   };
-  const historyAvailable = capabilities.taskHistory === true && degradedScope !== 'operations';
+  const historyAvailable = capabilities.taskHistory === true && degradedScope !== 'operations' && rootUsable;
   const counts = activityCounts({ tasks: activities.tasks, transfers: activities.transfers }, allowed);
   const visibleTasks = counts.visibleTasks;
   const visibleTransfers = counts.visibleTransfers;
   const activeActivityCount = counts.active;
   const closableActivityCount = counts.closable;
+  const failedActivityCount = [...visibleTasks, ...visibleTransfers].filter(record =>
+    ['failed', 'partial', 'interrupted'].includes(record.status) || (record as unknown as { items?: { status: string }[] }).items?.some(item => item.status === 'failed')).length;
 
   const activitySync = useRef(syncActivities);
   activitySync.current = syncActivities;
@@ -528,7 +748,10 @@ export function Panel(props: PanelProps): ReactNode {
     const timer = setInterval(() => {
       if (updating || !alive.current) return;
       updating = true;
-      void Promise.resolve(activitySync.current()).catch(failure => { if (alive.current) setError(failure); }).finally(() => { updating = false; });
+      void Promise.resolve(activitySync.current()).catch(failure => {
+        // A poll that repeats the same failure is one event, not one per tick.
+        if (alive.current) { notifyFailure(failure, { dedupeKey: `activity-sync:${failureCodeOf(failure) ?? 'TRANSPORT'}` }); setError(failure); }
+      }).finally(() => { updating = false; });
     }, capabilities.watch ? 5000 : 1500);
     return () => clearInterval(timer);
   }, [hasActiveTasks, capabilities.tasks, capabilities.transfers, capabilities.watch]);
@@ -557,14 +780,18 @@ export function Panel(props: PanelProps): ReactNode {
   useEffect(() => {
     if (!capabilities.watch) return;
     const targets = JSON.parse(watchKey) as { rootId: string; path: string }[];
-    if (targets.length > 128) { setWatchStatus('unavailable'); return; }
+    if (targets.length > 128) return;
     return startWatch({
       targets,
       parentSignal: runtime.controller.signal,
       handlers: () => watchHandlers.current,
       isBusy: () => interactionRef.current > 0,
-      onStatus: status => { if (alive.current) setWatchStatus(status); },
-      onError: failure => { if (alive.current) setError(failure); },
+      // Observation stays active without a status row or status-only renders.
+      onStatus: () => {},
+      onError: failure => {
+        // Observation failures repeat while a stream is down: one record per code.
+        if (alive.current) { notifyFailure(failure, { dedupeKey: `watch:${failureCodeOf(failure) ?? 'TRANSPORT'}` }); setError(failure); }
+      },
     });
   }, [capabilities.watch, watchKey, runtime]);
 
@@ -576,6 +803,12 @@ export function Panel(props: PanelProps): ReactNode {
       items.push({ ...stat, rootId, expectedVersion: stat.version });
     }
     activity.clipboard({ operation, items: items as never });
+    notify({
+      level: 'info',
+      title: t('clipboardItems', { count: items.length }),
+      message: t(operation === 'move' ? 'cut' : 'copy'),
+      code: 'CLIPBOARD_ITEMS',
+    });
   }); };
 
   const preparePaste = (): void => { void run(async () => {
@@ -603,6 +836,10 @@ export function Panel(props: PanelProps): ReactNode {
         ...(item.conflict === 'overwrite' && item.target ? { expectedTargetVersion: item.target.version } : {}),
       })),
     }, { persistent: true });
+    // Reported before it enters the activity store: a task that is already
+    // terminal is announced by this action, with the action's own wording, and the
+    // observer yields on the same identity instead of reporting it again.
+    reportTerminal('task', task);
     await putTask(task as TaskView);
     if (plan.operation === 'move') activity.clipboard(null);
     if (alive.current) setPastePlan(null);
@@ -611,7 +848,13 @@ export function Panel(props: PanelProps): ReactNode {
   const taskAction = (action: 'cancel' | 'retry', task: { id: string }): void => { void run(async () => {
     if (!capabilities.tasks) return;
     const requestId = api.requestId();
-    await putTask(await api.control(action === 'cancel' ? { op: 'tasks.cancel', requestId, taskId: task.id } : { op: 'tasks.retry', requestId, taskId: task.id }, { persistent: true }) as TaskView);
+    await putTask(await (async (): Promise<TaskView> => {
+      const changed = await api.control(action === 'cancel' ? { op: 'tasks.cancel', requestId, taskId: task.id } : { op: 'tasks.retry', requestId, taskId: task.id }, { persistent: true }) as TaskView;
+      // A retry starts a new attempt: it is reported before the store sees it, so
+      // an immediately failing attempt is announced once, with this action's words.
+      reportTerminal('task', changed);
+      return changed;
+    })());
   }); };
 
   async function prepareUpload(sources: readonly UploadSource[]): Promise<void> {
@@ -647,7 +890,14 @@ export function Panel(props: PanelProps): ReactNode {
   const pickDirectory = (): Promise<void> | void => {
     if (!allowed.transfers || !rootId) return;
     const picker = (window as unknown as { showDirectoryPicker?: (options: { mode: string }) => Promise<DirectoryHandleLike> }).showDirectoryPicker;
-    if (!picker) { setDirectoryFallback(true); directoryInput.current?.click(); return; }
+    // Without the handle picker the file-list fallback cannot see empty
+    // directories: that is an event the user can read later, not a banner that
+    // holds list height until it is dismissed.
+    if (!picker) {
+      notify({ level: 'warning', title: t('directoryFallback'), code: 'DIRECTORY_FALLBACK' });
+      directoryInput.current?.click();
+      return;
+    }
     return run(async () => {
       let handle: DirectoryHandleLike;
       try { handle = await picker({ mode: 'read' }); }
@@ -661,7 +911,6 @@ export function Panel(props: PanelProps): ReactNode {
         } else if (entry.kind === 'file') sources.push({ path: relative, kind: 'file', file: await entry.getFile() });
       }
       await collect(handle, handle.name);
-      setDirectoryFallback(false);
       await prepareUpload(sources);
     });
   };
@@ -694,8 +943,13 @@ export function Panel(props: PanelProps): ReactNode {
         if (result.value) activity.put('transfers', result.value as never);
         if (!result.ok) throw Object.assign(new Error(result.error?.message ?? 'Upload failed.'), result.error ?? {});
       } catch (failure) {
-        const code = typeof failure === 'object' && failure !== null ? (failure as { code?: unknown }).code : undefined;
-        if (!stopped() && alive.current) setError(typeof code === 'string' ? failure : Object.assign(new Error('Upload connection failed.'), { code: 'TRANSPORT' }));
+        // A missing code is a connection-level failure; an aborted request keeps its
+        // own identity so a user cancel is not turned into an error event.
+        const reported = failureCode(failure) === null
+          ? Object.assign(new Error('Upload connection failed.'), { code: 'TRANSPORT' })
+          : failure;
+        notifyTransferFailure(taskId, reported);
+        if (!stopped() && alive.current) setError(reported);
       }
     }
     try {
@@ -713,6 +967,7 @@ export function Panel(props: PanelProps): ReactNode {
       activity.put('transfers', latest as never);
       for (const item of latest.items) if (item.committed || item.status === 'skipped') upload.files.delete(item.path);
     } catch (failure) {
+      notifyTransferFailure(taskId, failure);
       if (!stopped() && alive.current) setError(failure);
     } finally {
       upload.working = false;
@@ -724,7 +979,11 @@ export function Panel(props: PanelProps): ReactNode {
     // cancellation/retry of an otherwise settled transfer.
     if (!stopped() && alive.current && rootId) {
       try { await listAt(rootId, directory); }
-      catch (failure) { if (!stopped() && alive.current) setError(failure); }
+      catch (failure) {
+        // The follow-up refresh is state-shaped: one record per code, not per attempt.
+        notifyFailure(failure, { dedupeKey: `upload-refresh:${failureCode(failure) ?? 'TRANSPORT'}` });
+        if (!stopped() && alive.current) setError(failure);
+      }
     }
   }
 
@@ -750,6 +1009,9 @@ export function Panel(props: PanelProps): ReactNode {
       });
       const task = await api.control({ op: 'transfers.begin', requestId: api.requestId(), direction: 'upload', rootId: plan.rootId, path: plan.path, items }, { persistent: true });
       runtime.uploads.set(task.id, { files, controller: new AbortController(), cancelled: false, working: false });
+      // A begin that is already terminal (an immediate refusal, for instance) is
+      // reported here, before the store hands the same state to the observer.
+      reportTerminal('transfer', task);
       activity.put('transfers', task as never);
       if (alive.current) setUploadPlan(null);
       return task.id;
@@ -772,6 +1034,9 @@ export function Panel(props: PanelProps): ReactNode {
       if (action === 'retry' && !canRetryTransfer(task as never)) throw Object.assign(new Error('Upload source files must be selected again.'), { code: 'UPLOAD_SOURCE_LOST' });
       const requestId = api.requestId();
       const result = await api.control(action === 'cancel' ? { op: 'transfers.cancel', requestId, taskId: task.id } : { op: 'transfers.retry', requestId, taskId: task.id }, { persistent: true });
+      // A retry starts a new attempt; an immediate terminal state belongs to this
+      // action, and the observer yields on the same identity.
+      reportTerminal('transfer', result);
       activity.put('transfers', result as never);
       if (action === 'retry') {
         if (task.direction === 'download') setDownload({ id: result.id, downloadName: result.downloadName ?? null });
@@ -781,16 +1046,26 @@ export function Panel(props: PanelProps): ReactNode {
     if (retry) await processUpload(retry);
   })(); };
 
+  async function prepareDownload(target: { rootId: string; path: string }, bindEntry: boolean): Promise<void> {
+    const snapshot = bindEntry ? await api.control({ op: 'entries.stat', ...target }) : null;
+    const task = await api.control({
+      op: 'transfers.begin', requestId: api.requestId(), direction: 'download', ...target,
+      ...(snapshot ? { expectedVersion: snapshot.version } : {}),
+    }, { persistent: true });
+    // A download that already finished server-side is this action's outcome.
+    reportTerminal('transfer', task);
+    activity.put('transfers', task as never);
+    if (alive.current) setDownload({ id: task.id, downloadName: task.downloadName ?? null });
+  }
   const beginDownload = (): void => { void run(async () => {
     if (!allowed.transfers || !rootId || selectedEntries.length > 1) return;
     const entry = selectedEntries[0];
-    const snapshot = entry ? await api.control({ op: 'entries.stat', rootId, path: entry.path }) : null;
-    const task = await api.control({
-      op: 'transfers.begin', requestId: api.requestId(), direction: 'download', rootId, path: entry?.path ?? directory,
-      ...(snapshot ? { expectedVersion: snapshot.version } : {}),
-    }, { persistent: true });
-    activity.put('transfers', task as never);
-    if (alive.current) setDownload({ id: task.id, downloadName: task.downloadName ?? null });
+    await prepareDownload({ rootId, path: entry?.path ?? directory }, Boolean(entry));
+  }); };
+  const downloadViewedFile = (): void => { void run(async () => {
+    const target = fileAttempt ?? active;
+    if (!allowed.transfers || !target || busy > 0) return;
+    await prepareDownload({ rootId: target.rootId, path: target.path }, true);
   }); };
 
   const beginReference = (): void => { void run(async () => {
@@ -830,29 +1105,94 @@ export function Panel(props: PanelProps): ReactNode {
     if (!allowed.write || !rootId || busy || selectionSaving) return;
     if (kind === 'rename' && selectedEntries.length !== 1) return;
     const entry = kind === 'rename' ? await api.control({ op: 'entries.stat', rootId, path: selectedEntries[0]!.path }) : null;
-    if (alive.current) { setNameInput(entry?.name ?? ''); setNameDialog({ kind, rootId, directory, entry }); }
+    if (alive.current) { discardNameAttempt(); setNameInput(entry?.name ?? ''); setNameDialog({ kind, rootId, directory, entry }); }
   }); };
-  const submitName = (): void => { void run(async () => {
-    if (!allowed.write || !nameDialog) return;
-    if (!nameInput || nameInput === '.' || nameInput === '..' || /[/\0]/.test(nameInput)) throw Object.assign(new Error('A single name is required.'), { code: 'INVALID_PATH' });
-    const operation = nameDialog;
-    if (operation.kind === 'rename' && operation.entry) {
-      const source = operation.entry;
-      const result = await api.control({ op: 'entries.rename', requestId: api.requestId(), rootId: operation.rootId, path: source.path, name: nameInput, expectedVersion: source.version }, { persistent: true });
-      const affected = documents.getSnapshot().documents.filter(document => document.rootId === operation.rootId && (document.path === source.path || document.path.startsWith(`${source.path}/`)));
-      for (const document of affected) {
-        const nextPath = result.path + document.path.slice(source.path.length);
-        try { documents.relocate(document.id, await api.control({ op: 'text.read', rootId: operation.rootId, path: nextPath }, { persistent: true })); }
-        catch (failure) { documents.markMissing(document.rootId, document.path); throw failure; }
+  /**
+   * One submission of the name dialog.
+   *
+   * `allowNonExclusiveRename` is true only for the reviewed compatibility action,
+   * which is a second, separately acknowledged submission of the same attempt. It
+   * is re-checked here instead of being trusted from the view: the button carries
+   * no authority, and Enter, the primary action and every create submit strictly.
+   */
+  const submitName = (allowNonExclusiveRename: boolean): void => {
+    if (busy || nameSubmitting.current) return;
+    if (allowNonExclusiveRename && (!nameCompatibility || !allowsNonExclusiveRename(nameRefusal))) return;
+    // The acknowledgement was given to the submission that is starting now, so it
+    // ends with it: nothing stays authorized while this request is in flight.
+    setNameCompatibility(false);
+    nameSubmitting.current = true;
+    void run(async () => {
+      if (!allowed.write || !nameDialog) return;
+      const operation = nameDialog;
+      /**
+       * Reports one failure of this submission.
+       *
+       * While this view is alive the dialog is where its outcome belongs: the
+       * shared slot stays untouched. A failure that lands after the view is gone
+       * has no dialog left to speak through, so it is recorded in the history
+       * exactly like any other confirmed persistent mutation.
+       *
+       * `refusal` marks the rename request itself — the only failure that may ever
+       * offer the compatible rename. A later failure of the same submission, even
+       * one repeating the same code, is shown (when the view is alive) without any
+       * compatibility entry.
+       */
+      const reject = (failure: unknown, refusal = false): void => {
+        if (!alive.current) { if (!runtime.controller.signal.aborted) notifyFailure(failure); return; }
+        setNameFailure(failure);
+        setNameRefusal(refusal ? failure : null);
+      };
+      if (!nameInput || nameInput === '.' || nameInput === '..' || /[/\0]/.test(nameInput)) {
+        reject(Object.assign(new Error('A single name is required.'), { code: 'INVALID_PATH' }));
+        return;
       }
-    } else {
-      const filename = [operation.directory, nameInput].filter(Boolean).join('/');
-      const requestId = api.requestId();
-      await api.control(operation.kind === 'file' ? { op: 'entries.create-file', requestId, rootId: operation.rootId, path: filename } : { op: 'entries.create-directory', requestId, rootId: operation.rootId, path: filename }, { persistent: true });
-      if (operation.kind === 'file') documents.open(await api.control({ op: 'text.read', rootId: operation.rootId, path: filename }, { persistent: true }));
-    }
-    if (alive.current) { setNameDialog(null); await listAt(operation.rootId, operation.directory); }
-  }); };
+      if (operation.kind === 'rename' && operation.entry) {
+        const source = operation.entry;
+        let result;
+        try {
+          // A fresh request id per logical submission: the compatible rename is a
+          // different authorization and must never replay the refused one. The
+          // version is the one this dialog captured, never re-read here, so the
+          // Host's own re-check decides — the UI cannot refresh a bypass.
+          result = await api.control({
+            op: 'entries.rename', requestId: api.requestId(), rootId: operation.rootId, path: source.path, name: nameInput,
+            expectedVersion: source.version,
+            ...(allowNonExclusiveRename ? { allowNonExclusiveRename: true as const } : {}),
+          }, { persistent: true });
+        } catch (failure) { reject(failure, true); return; }
+        // The rename is committed from here on. A document that cannot follow it is
+        // a failure of this submission — reported in the same place, with no
+        // compatibility entry, because the rename itself was never refused.
+        const affected = documents.getSnapshot().documents.filter(document => document.rootId === operation.rootId && (document.path === source.path || document.path.startsWith(`${source.path}/`)));
+        for (const document of affected) {
+          const nextPath = result.path + document.path.slice(source.path.length);
+          try { documents.relocate(document.id, await api.control({ op: 'text.read', rootId: operation.rootId, path: nextPath }, { persistent: true })); }
+          catch (failure) { documents.markMissing(document.rootId, document.path); reject(failure); return; }
+        }
+        notify({ level: 'success', title: `${t('rename')}: ${source.name} → ${nameInput}`, code: 'ENTRY_RENAMED' });
+      } else {
+        const filename = [operation.directory, nameInput].filter(Boolean).join('/');
+        const requestId = api.requestId();
+        try {
+          await api.control(operation.kind === 'file' ? { op: 'entries.create-file', requestId, rootId: operation.rootId, path: filename } : { op: 'entries.create-directory', requestId, rootId: operation.rootId, path: filename }, { persistent: true });
+        } catch (failure) { reject(failure); return; }
+        if (operation.kind === 'file') {
+          // The file is created from here on: a read that cannot follow it is this
+          // submission's outcome, so it is reported in the same dialog rather than
+          // in a shared slot this dialog no longer reads.
+          let opened;
+          try { opened = await api.control({ op: 'text.read', rootId: operation.rootId, path: filename }, { persistent: true }); }
+          catch (failure) { reject(failure); return; }
+          documents.open(opened);
+          if (alive.current) { setFileAttempt(null); setSurface('viewer'); }
+        }
+        notify({ level: 'success', title: `${t(operation.kind === 'file' ? 'newFile' : 'newDirectory')}: ${filename}`, code: 'ENTRY_CREATED' });
+      }
+      // The attempt is over, so the acknowledgement given for it is over too.
+      if (alive.current) { discardNameAttempt(); setNameDialog(null); await listAt(operation.rootId, operation.directory); }
+    }).finally(() => { nameSubmitting.current = false; });
+  };
 
   const publishDelete = (attempt: DeleteAttempt, change: Partial<DeleteAttempt>): void => {
     if (!alive.current || !deleteAttempt.current.isCurrent(attempt)) return;
@@ -881,7 +1221,6 @@ export function Panel(props: PanelProps): ReactNode {
     };
     deleteAttempt.current.begin(attempt);
     setError(null);
-    setOperationResult(null);
     setDeleteDialog({ ...attempt });
     const parentSignal = lifetime.current?.signal;
     const abort = (): void => attempt.controller.abort();
@@ -918,16 +1257,23 @@ export function Panel(props: PanelProps): ReactNode {
     void run(async () => {
       try {
         const result = await api.control({ op: 'delete.commit', requestId: attempt.requestId, planId: plan.id, scope: plan.scope, confirmed: true }, { persistent: true });
+        // The confirmed deletion already happened: its outcome is recorded here,
+        // before any reconciliation and whether or not this view is still alive.
+        notifyOperationResult(result);
         fileGeneration.current += 1;
         for (const item of result.results) {
           if (item.status === 'completed' || item.removed) documents.markMissing(item.rootId, item.path);
           else {
             try { await refreshDocuments(item.rootId, item.path, true); }
-            catch (failure) { if (alive.current) setError(failure); }
+            catch (failure) {
+              // Reconciliation is a follow-up: it cannot unmake the deletion above,
+              // so it is reported separately instead of replacing that outcome.
+              notifyFailure(failure);
+              if (alive.current) setError(failure);
+            }
           }
         }
         if (alive.current) {
-          setOperationResult(result);
           if (deleteAttempt.current.isCurrent(attempt)) { deleteAttempt.current.clear(attempt); setDeleteDialog(null); }
           await listAt(rootId, directory);
         }
@@ -939,15 +1285,11 @@ export function Panel(props: PanelProps): ReactNode {
   };
 
   const fileActions: FileActions = {
-    dismissNotice(kind) {
-      if (kind === 'directory-fallback') setDirectoryFallback(false);
-      else if (kind === 'operation-result') setOperationResult(null);
-      else setDismissedClipboard(activities.clipboard);
-    },
     openDirectory,
     openFile,
     refresh,
     toggleSelection: (path, checked) => setSelection(previous => (checked ? [...new Set([...previous, path])] : previous.filter(item => item !== path))),
+    clearSelection: () => setSelection([]),
     beginName,
     prepareDelete,
     copySelection,
@@ -960,20 +1302,46 @@ export function Panel(props: PanelProps): ReactNode {
   };
 
   const dialogContext = { t, ui, busy: busy > 0, errorText };
+  /**
+   * The reviewed downgrade this name dialog may offer.
+   *
+   * It is derived, per render, from this attempt's own rename refusal: no later
+   * failure of the same submission, no other action's failure, no cached answer and
+   * no other dialog can produce it.
+   */
+  const nameCompatibilityOffer = nameDialog?.kind === 'rename' && allowsNonExclusiveRename(nameRefusal)
+    ? {
+      acknowledged: nameCompatibility,
+      onAcknowledge: (acknowledged: boolean) => setNameCompatibility(acknowledged === true),
+      onSubmit: () => submitName(true),
+    }
+    : null;
 
   /**
-   * The code editor's props, derived during render rather than cached: a rename
-   * or a mode switch re-reads the current path, so the language hint can never
-   * come from a stale one. Both modes carry the same LF-normalized draft — BOM
-   * and line endings stay with `base` and the Host save chain — and the write
-   * gate is the same `allowed.write` every other entry point uses.
+   * Follows a notification's own navigation target.
+   *
+   * The drawer closes first, and nothing else moves: the directory, documents,
+   * selection and clipboard stay exactly as they were, and `surface` changes only
+   * when the record explicitly names a surface to show. A `viewer` target that has
+   * nothing to show stays where it is instead of opening an empty viewer.
    */
+  const notificationAction = (action: NotificationAction, _entry: NotificationEntry): void => {
+    if (action.kind !== 'surface') return;
+    setNotificationsOpen(false);
+    if (action.surface === 'tasks') { setSurface('tasks'); return; }
+    if (active || fileAttempt) setSurface('viewer');
+  };
+
+  const notificationEntry = (
+    <NotificationButton t={t} ui={ui} unreadCount={notificationState.unreadCount} onOpen={() => setNotificationsOpen(true)} />
+  );
+
+  /** The current path supplies the grammar; write permission and availability gate typing. */
   const activeEditor = active ? {
     documentId: active.id,
     path: active.path,
     value: active.draft,
-    mode: active.editing ? ('edit' as const) : ('preview' as const),
-    canWrite: allowed.write === true,
+    canWrite: allowed.write === true && !active.missing,
     languageHint: ui.languageForPath?.(active.path),
     ariaLabel: `${t('editor')}: ${active.path}`,
     t,
@@ -981,92 +1349,113 @@ export function Panel(props: PanelProps): ReactNode {
     onSave: () => save(active.id),
   } : null;
 
+  const nestedDialog = Boolean(nameDialog || deleteDialog || pastePlan || uploadPlan || download || referencePlan || closing || conflicting);
+  const viewerTitle = fileAttempt?.path ?? active?.path ?? t('preview');
+  /**
+   * The pending reference controls live in the task surface now, which is where an
+   * insertion is retried. They are activity state, not history, so clearing
+   * notifications never removes them.
+   */
+  const pendingReferences = activities.references as unknown as readonly { id: string; sessionId: string; status: string; mentions: readonly string[]; error?: string | null }[];
+
   return (
     <section className="dsh-fm" aria-label={t('title')} data-fm-version={__FM_VERSION__}>
       <style>{PANEL_CSS}</style>
-      <header>
-        <div><h1>{t('title')}</h1><div className="fm-subtitle">{t('subtitle')}</div></div>
-        <span className="fm-badge">{t('stage')}</span>
-      </header>
-      {error ? <Notice t={t} ui={ui} id="error" error onDismiss={() => setError(null)}>{errorText(error)}</Notice> : null}
-      {degraded ? (
-        <div className="fm-notice" role="status" data-fm-degraded={degraded.scope}>
-          {`${t('degraded')}: ${degraded.message}`}
+      {/* The notification drawer is a peer overlay: it suspends whatever surface is
+          open instead of replacing it, so closing it returns to that view. */}
+      <div className="fm-base" {...(surface || notificationsOpen ? { inert: '' } : {})}>
+      <header className="fm-main-header">
+        <h1>{t('title')}</h1>
+        <div className="fm-header-actions">
+          <Button variant="ghost" size="sm" type="button" disabled={!active} onClick={resumeViewer} data-fm-action="open-documents" aria-haspopup="dialog">
+            {t('openDocuments')}{documentState.documents.length ? ` · ${documentState.documents.length}` : ''}
+          </Button>
+          {allowed.tasks || allowed.transfers || !historyAvailable || pendingReferences.length > 0 ? <Button variant="ghost" size="sm" type="button"
+            className={failedActivityCount || !historyAvailable || activities.historyFailures.length ? 'fm-task-attention' : undefined}
+            onClick={() => setSurface('tasks')} data-fm-action="show-tasks" aria-haspopup="dialog">
+            {t('tasks')}<span className="fm-task-count" data-fm-task-summary role="status">{activeActivityCount ? ` · ${activeActivityCount}` : ''}{failedActivityCount ? ` · ${t('failedTasks', { count: failedActivityCount })}` : ''}{!historyAvailable || activities.historyFailures.length ? ' !' : ''}</span>
+          </Button> : null}
+          {notificationEntry}
         </div>
-      ) : null}
-      {capabilities.watch ? <div className="fm-muted" role="status" data-fm-watch={watchStatus} style={{ padding: '6px 14px' }}>{t(`watch.${watchStatus}`)}</div> : null}
-      {activities.references.length > 0 ? (
-        <div style={{ maxHeight: '18vh', overflow: 'auto' }}>
-          {activities.references.map(request => {
-            const reference = request as unknown as { id: string; sessionId: string; status: string; mentions: readonly string[]; error?: string | null };
-            return (
-              <div key={reference.id} className="fm-notice" data-fm-reference-request={reference.sessionId}>
-                <span>{`${sessionOptions.find(session => session?.id === reference.sessionId)?.displayTitle ?? reference.sessionId}: ${t(reference.error || 'referenceWaiting')}`}</span>
-                {button('referenceRetry', { disabled: busy > 0 || reference.status === 'inserting', onClick: () => retryReference(reference) })}
-                {button('cancel', {
-                  disabled: reference.status === 'inserting',
-                  onClick: () => { if (activity.getSnapshot().references.find(item => item.id === reference.id)?.status !== 'inserting') activity.remove('references', reference.id); },
-                })}
-              </div>
-            );
-          })}
+      </header>
+      {/* Degradation is business state: it keeps a compact indicator here, with the
+          full reason on its title, and the explanation in the notification history —
+          read-only mode never depends on opening the drawer. */}
+      {degraded ? (
+        <div className="fm-notice fm-degraded-chip" role="status" title={degraded.message} data-fm-degraded={degraded.scope}>
+          {degraded.readOnly ? t('readOnly') : t('degraded')}
         </div>
       ) : null}
       <div className="fm-layout">
-        <aside>
-          <h2>{t('roots')}</h2>
-          {roots.map(item => (
-            <div className="fm-rootrow" key={item.id}>
-              <Button
-                variant="ghost" size="sm" type="button" className={item.id === rootId ? 'fm-active' : ''} title={item.path}
-                disabled={busy > 0} onClick={() => openDirectory(item.id, '')} data-fm-root
-              >
-                <span>{item.label}</span>
-              </Button>
-              <Button
-                variant="ghost" size="sm" type="button" title={t('removeRoot')} aria-label={`${t('removeRoot')}: ${item.label}`}
-                disabled={busy > 0} onClick={() => beginRootRemoval(item)}
-              >×</Button>
-            </div>
-          ))}
-          <form onSubmit={add} data-fm-add-root>
-            <input
-              value={pathInput} placeholder={t('pathPlaceholder')} aria-label={t('pathPlaceholder')} list="dsh-fm-workspace-candidates"
-              required disabled={busy > 0} onChange={event => setPathInput(event.target.value)} data-fm-add-path
-            />
-            <datalist id="dsh-fm-workspace-candidates">{workspaces.map(workspace => <option key={workspace.id} value={workspace.path}>{workspace.title}</option>)}</datalist>
-            {button('add', { type: 'submit', variant: 'primary', disabled: busy > 0 || !pathInput.trim() })}
-          </form>
-          {capabilities.persistentRoots === false ? <p className="fm-muted">{t('notPersistent')}</p> : null}
-        </aside>
+
         <FileSection
           t={t} ui={ui} busy={busy} capabilities={allowed} rootId={rootId} root={root} directory={directory}
-          listing={listing} selection={selection} selected={selected} clipboard={activities.clipboard} clipboardNoticeVisible={activities.clipboard !== dismissedClipboard} directoryFallback={directoryFallback}
-          operationResult={operationResult} selectionSaving={selectionSaving} loadingMore={appendPending.current} errorText={errorText}
+          listing={listing} selection={selection} selected={selected} clipboard={activities.clipboard}
+          notifications={notifications} selectionSaving={selectionSaving} loadingMore={appendPending.current}
           uploadInput={uploadInput} directoryInput={directoryInput} actions={fileActions}
         />
-        <section className="fm-preview">
-          {documentState.documents.length > 0 ? (
-            <nav className="fm-tabs" aria-label={t('openDocuments')}>
-              {documentState.documents.map(document => (
-                <Button
-                  key={document.id} variant="ghost" size="sm" type="button"
-                  className={document.id === active?.id ? 'fm-active' : ''} title={`${document.rootId}: ${document.path}`}
-                  onClick={() => documents.activate(document.id)} data-fm-tab={document.id}
-                >{`${document.dirty ? '● ' : ''}${document.path.split('/').at(-1)}`}</Button>
-              ))}
+
+      </div>
+
+      <footer className="fm-list-footer">
+        <span className="fm-list-status" data-fm-list-status role="status" aria-live="polite">{busy ? t('loading') : `${listing.entries.length} / ${listing.total} ${t('items')}`}{selectedEntries.length > 0 ? ` · ${t('selectionCount', { count: selectedEntries.length })}` : ''}</span>
+        <span className="fm-footer-note">{t('note')}</span>
+      </footer>
+      </div>
+      {/* Outside `fm-base` and outside every overlay card on purpose: those become
+          inert while a surface or the drawer is open, and an inert subtree is not
+          announced. This is the one channel a new result speaks through. */}
+      <NotificationLiveRegion entries={notificationState.entries} />
+      <Overlay name="viewer" title={viewerTitle} open={surface === 'viewer'} suspended={nestedDialog || notificationsOpen} onClose={() => setSurface(null)}>
+        <div ref={viewerHeader} className="fm-overlay-header fm-viewer-header">
+          {button('backToFiles', { onClick: () => setSurface(null), 'data-fm-action': 'back-to-files' })}
+          {/* One row per open file, single file included. Switch and close are
+              sibling buttons; the tab area scrolls sideways so the window
+              controls keep their place. The wrapper also carries the active
+              marker: the tab stylesheet fills that one surface, so the name and
+              its X read as a single chip instead of two adjacent buttons. */}
+          {!fileAttempt && documentState.documents.length > 0 ? (
+            <nav className="fm-tabs fm-viewer-tabs" aria-label={t('openDocuments')}>
+              {documentState.documents.map(document => {
+                const activeDocument = document.id === active?.id;
+                const name = document.path.split('/').at(-1) ?? document.path;
+                return (
+                  <span key={document.id} className={activeDocument ? 'fm-tab fm-active' : 'fm-tab'}>
+                    <Button
+                      variant="ghost" size="sm" type="button"
+                      className={activeDocument ? 'fm-active' : ''}
+                      title={`${document.rootId}: ${document.path}`}
+                      aria-current={activeDocument ? 'true' : undefined}
+                      onClick={() => { fileGeneration.current++; setFileAttempt(null); documents.activate(document.id); }}
+                      data-fm-tab={document.id}
+                    >{`${document.dirty ? '● ' : ''}${name}`}</Button>
+                    <Button
+                      variant="ghost" size="sm" type="button" icon={<ui.IconCloseOutlineRegular />}
+                      title={`${t('closeDocument')}: ${document.path}`}
+                      aria-label={`${t('closeDocument')}: ${document.path}`}
+                      disabled={document.saving}
+                      onClick={() => closeDocument(document.id)}
+                      data-fm-action="close-document" data-fm-close-document={document.id}
+                    />
+                  </span>
+                );
+              })}
             </nav>
-          ) : null}
-          <div className="fm-pathbar">
-            <span className="fm-preview-title" title={active?.path}>{active?.path || t('preview')}</span>
-            {active ? (
-              <div className="fm-actions">
-                {!active.editing ? button('edit', { disabled: !allowed.write || active.missing, onClick: () => documents.edit(active.id, active.draft), 'data-fm-action': 'edit' }) : null}
-                {active.editing ? button(active.saving ? 'saving' : 'save', { variant: 'primary', disabled: !allowed.write || !active.dirty || active.saving || active.missing, onClick: () => save(active.id), 'data-fm-action': 'save' }) : null}
-                {button('closeDocument', { disabled: active.saving, onClick: () => closeDocument(active.id), 'data-fm-action': 'close-document' })}
-              </div>
-            ) : null}
-          </div>
+          ) : <strong className="fm-viewer-title" title={viewerTitle}>{viewerTitle.split('/').at(-1)}</strong>}
+          {!fileAttempt && active && allowed.write && !active.missing ? button(active.saving ? 'saving' : 'save', {
+            variant: 'ghost', disabled: !active.dirty || active.saving, onClick: () => save(active.id), 'data-fm-action': 'save',
+          }) : null}
+          {/* The window X hides the editor only; it stays enabled during saves. */}
+          <Button variant="ghost" size="sm" type="button" icon={<ui.IconCloseOutlineRegular />} title={t('closeViewer')} aria-label={t('closeViewer')}
+            onClick={closeViewer} data-fm-action="close-viewer" />
+        </div>
+        {fileAttempt ? <div className="fm-viewer-attempt" aria-busy={fileAttempt.loading} data-fm-file-attempt={fileAttempt.loading ? 'loading' : 'failed'}>
+          {fileAttempt.loading ? <div className="fm-placeholder" role="status">{t('loading')}</div> : <>
+            <div className="fm-error" role="alert">{errorText(fileAttempt.error)}</div>
+            {button('viewerDownload', { disabled: !allowed.transfers || busy > 0, onClick: downloadViewedFile, 'data-fm-action': 'download-viewed-file' })}
+          </>}
+        </div> : null}
+        <section className="fm-preview" hidden={Boolean(fileAttempt)}>
           {active?.missing ? <div className="fm-error" data-fm-missing>{t('missing')}</div> : null}
           {active?.external ? <div className="fm-notice" data-fm-external-change>{t('external')}{' '}{button('compare', { onClick: () => setConflictId(active.id) })}</div> : null}
           {activeEditor
@@ -1079,9 +1468,14 @@ export function Panel(props: PanelProps): ReactNode {
             </footer>
           ) : null}
         </section>
-      </div>
-      {allowed.tasks || allowed.transfers || !historyAvailable ? (
-        <section className="fm-taskarea" aria-label={t('tasks')} style={{ maxHeight: '24vh', overflow: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)' }}>
+      </Overlay>
+      <Overlay name="tasks" title={t('tasks')} open={surface === 'tasks'} suspended={nestedDialog || notificationsOpen} drawer onClose={() => setSurface(null)}>
+        <div className="fm-overlay-header">
+          <strong>{t('tasks')}</strong>
+          {button('close', { onClick: () => setSurface(null), 'data-fm-action': 'close-tasks' })}
+        </div>
+      {allowed.tasks || allowed.transfers || !historyAvailable || pendingReferences.length > 0 ? (
+        <section className="fm-taskarea" aria-label={t('tasks')}>
           <div className="fm-pathbar">
             <div className="fm-actions"><strong>{t('tasks')}</strong><span data-fm-active-count={activeActivityCount}>{`${activeActivityCount} ${t('activeTasks')}`}</span></div>
             <div className="fm-actions">
@@ -1090,6 +1484,30 @@ export function Panel(props: PanelProps): ReactNode {
               {button(activities.tasksCollapsed ? 'expandTasks' : 'collapseTasks', { onClick: () => activity.collapse(!activities.tasksCollapsed), 'aria-expanded': !activities.tasksCollapsed, 'aria-controls': 'dsh-fm-task-cards', 'data-fm-history-action': 'toggle' })}
             </div>
           </div>
+          {/* A reference that is still waiting is work in progress, so its controls
+              live here — next to the tasks — and a notification navigates to this
+              surface instead of holding the only copy of the entry point. Cleared
+              history never removes them: they belong to the activity store. */}
+          {pendingReferences.length > 0 ? (
+            <div className="fm-notice fm-pending-references" data-fm-pending-references={pendingReferences.length}>
+              <div className="fm-actions"><strong>{t('reference')}</strong></div>
+              {pendingReferences.map(reference => (
+                <div key={reference.id} className="fm-notice" data-fm-reference-request={reference.sessionId}>
+                  <span>{`${sessionOptions.find(session => session?.id === reference.sessionId)?.displayTitle ?? reference.sessionId}: ${t(reference.error || 'referenceWaiting')}`}</span>
+                  {button('referenceRetry', {
+                    disabled: busy > 0 || reference.status === 'inserting',
+                    onClick: () => retryReference(reference),
+                    'data-fm-action': 'reference-retry', 'data-fm-reference-request': reference.sessionId,
+                  })}
+                  {button('cancel', {
+                    disabled: reference.status === 'inserting',
+                    'data-fm-action': 'reference-cancel', 'data-fm-reference-request': reference.sessionId,
+                    onClick: () => { if (activity.getSnapshot().references.find(item => item.id === reference.id)?.status !== 'inserting') activity.remove('references', reference.id); },
+                  })}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {!historyAvailable ? (
             <div className="fm-notice" role="status" data-fm-history-unavailable>
               {`${t('historyUnavailable')}${degraded ? ` · ${degraded.message}` : ''}`}
@@ -1101,6 +1519,7 @@ export function Panel(props: PanelProps): ReactNode {
               {activities.historyFailures.map(failure => <div key={`${failure.kind}:${failure.taskId}`}>{`${failure.taskId}: ${errorText(failure.error)}`}</div>)}
             </div>
           ) : null}
+          {!visibleTasks.length && !visibleTransfers.length && historyAvailable ? <div className="fm-placeholder">{t('noTasks')}</div> : null}
           <div id="dsh-fm-task-cards" hidden={activities.tasksCollapsed} data-fm-task-cards>
             {visibleTasks.map(task => {
               const record = task as unknown as TaskView;
@@ -1155,12 +1574,14 @@ export function Panel(props: PanelProps): ReactNode {
           </div>
         </section>
       ) : null}
-      <footer>
-        <span role="status" aria-live="polite">{busy ? t('loading') : `${listing.entries.length} / ${listing.total} ${t('items')}`}</span>
-        <span>{t('note')}</span>
-      </footer>
-      {nameDialog ? <NameDialog {...dialogContext} error={error} kind={nameDialog.kind} value={nameInput} onCancel={() => setNameDialog(null)} onChange={setNameInput} onSubmit={submitName} /> : null}
-      <RootRemovalDialog {...dialogContext} attempt={rootRemoval} onCancel={() => cancelRootRemoval(rootRemoval?.id)} onConfirm={() => confirmRootRemoval(rootRemoval?.id)} />
+      </Overlay>
+      {nameDialog ? <NameDialog
+        {...dialogContext} error={nameFailure} kind={nameDialog.kind} value={nameInput}
+        compatibility={nameCompatibilityOffer}
+        onCancel={() => { discardNameAttempt(); setNameDialog(null); }}
+        onChange={value => { discardNameAttempt(); setNameInput(value); }}
+        onSubmit={() => submitName(false)}
+      /> : null}
       <DeleteDialog
         {...dialogContext} write={allowed.write === true} attempt={deleteDialog}
         onCancel={() => cancelDelete(deleteDialog?.id)} onAcknowledge={acknowledged => { if (deleteDialog) acknowledgeDelete(deleteDialog.id, acknowledged); }} onConfirm={() => commitDelete(deleteDialog?.id)}
@@ -1171,6 +1592,14 @@ export function Panel(props: PanelProps): ReactNode {
       <ReferenceDialog {...dialogContext} error={error} plan={referencePlan} sessionId={referenceSession} sessions={sessionOptions} onCancel={() => setReferencePlan(null)} onChange={setReferenceSession} onConfirm={submitReference} />
       <CloseDialog {...dialogContext} write={allowed.write === true} document={closing ? { path: closing.path, saving: closing.saving, missing: closing.missing } : null} onCancel={() => setCloseId(null)} onDiscard={() => { if (closing && documents.close(closing.id, { discard: true })) setCloseId(null); }} onSaveClose={saveAndClose} />
       <ConflictDialog {...dialogContext} document={conflicting?.external ? { path: conflicting.path, draft: conflicting.draft, external: { text: conflicting.external.text } } : null} onCancel={() => setConflictId(null)} onRebase={() => { if (conflicting) documents.rebase(conflicting.id); setConflictId(null); setError(null); }} />
+      <NotificationDrawer
+        t={t} ui={ui} open={notificationsOpen} suspended={nestedDialog}
+        entries={notificationState.entries}
+        onClose={() => setNotificationsOpen(false)}
+        onDismiss={id => notifications.remove(id)}
+        onClear={() => notifications.clear()}
+        onAction={notificationAction}
+      />
     </section>
   );
 }

@@ -92,7 +92,7 @@ async function openDeep(view) {
   }
 }
 
-const rootLabelOf = view => view.manager.listRoots()[0].label;
+const rootLabelOf = view => view.manager.getRoot().label;
 
 // --- stylesheet declarations -------------------------------------------------
 //
@@ -334,36 +334,35 @@ test('a failed navigation keeps the current levels and reports the error', async
   } });
   await view.click({ 'data-fm-entry': 'directory', 'data-fm-path': 'l1' });
   assert.deepEqual(crumbControls(view).map(textOf), [rootLabelOf(view)], 'a rejected navigation must not commit a path level');
-  const alerts = nodes(view.renderer, { role: 'alert' });
-  assert.equal(alerts.length, 1, 'the failure must be reported');
-  assert.equal(textOf(alerts[0]), '文件系统操作失败。');
+  // The failure is reported as an event in the notification history; the list no
+  // longer renders an error banner, and the path level must still not move.
+  const reported = view.notifications.getSnapshot().entries.filter(entry => entry.code === 'IO_ERROR');
+  assert.equal(reported.length, 1, 'the failure must be reported');
+  assert.equal(reported[0].level, 'error');
+  assert.equal(nodes(view.renderer, { role: 'alert' }).length, 0, 'the list itself no longer carries the error');
   assert.equal(refreshControl(view).props.disabled, false, 'a failure must not leave the path controls stuck');
 });
 
-test('a Host without a granted root keeps refresh disabled and shows no level', async t => {
+test('a Host whose root could not be opened keeps refresh disabled and shows no level', async t => {
   const view = await setup(t, { intercept: async (url, init, route) => {
     const response = await route(url, init);
     if (init.body && controlBody(init).op === 'bootstrap') {
       const payload = await response.json();
-      payload.value.roots = [];
+      payload.value.root = null;
+      payload.value.degraded = { scope: 'filesystem', code: 'ROOT_UNAVAILABLE', message: 'The browsing root could not be opened.', readOnly: false };
       return new Response(JSON.stringify(payload), { headers: { 'content-type': 'application/json' } });
     }
     return response;
   } });
-  assert.deepEqual(crumbControls(view).map(textOf), [], 'no granted root means no breadcrumb level');
+  assert.deepEqual(crumbControls(view).map(textOf), [], 'no root means no breadcrumb level');
   assert.equal(refreshControl(view).props.disabled, true, 'without a root there is nothing to refresh');
+  assert.equal(nodes(view.renderer, { 'data-fm-no-root': 'unavailable' }).length, 1, 'the panel explains the missing root instead of showing an empty list');
 });
 
 test('a long root label reaches the root crumb verbatim', async t => {
   const longName = `根目录_${'长'.repeat(30)}_尾`;
-  const view = await setup(t, { seed: root => mkdir(path.join(root, longName)) });
-  act(() => node(view.renderer, { 'data-fm-add-path': true }).props.onChange({ target: { value: path.join(view.root, longName) } }));
-  await act(async () => {
-    await node(view.renderer, { 'data-fm-add-root': true }).props.onSubmit({ preventDefault() {} });
-    await view.settle();
-  });
-  const entry = nodes(view.renderer, { 'data-fm-root': true }).find(candidate => textOf(candidate).includes(longName));
-  assert.ok(entry, 'the added root must appear in the root list');
-  await clickElement(view, entry);
-  assert.equal(textOf(crumbControls(view)[0]), longName, 'the root level must show the full granted label');
+  const view = await setup(t, { rootName: longName });
+  assert.equal(textOf(crumbControls(view)[0]), longName, 'the root level must show the full opening label');
+  assert.equal(crumbControls(view).length, 1, 'the root itself is the only level');
+  assert.equal(view.runtime.location.path, '', 'and browsing starts at the root');
 });

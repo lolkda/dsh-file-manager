@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -13,31 +13,54 @@ async function fixture(t) {
   const outside = path.join(base, 'root-other');
   await mkdir(root);
   await mkdir(outside);
-  const manager = createManager();
-  assert.equal(typeof manager.addRoot, 'function', 'adding explicit root grants is not implemented');
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
   return { base, root, outside, manager, grant };
 }
 
-test('adding the same canonical directory twice reuses the grant', async t => {
-  const { manager, root, grant } = await fixture(t);
-  const again = await manager.addRoot({ path: `${root}/.` });
-  assert.equal(again.id, grant.id);
-  assert.equal((await manager.listRoots()).length, 1);
-});
+async function directoryIdentity(target) {
+  const found = await stat(target, { bigint: true });
+  return `${found.dev}:${found.ino}`;
+}
 
-test('adding a relative path is rejected without creating a grant', async () => {
-  const manager = createManager();
-  assert.equal(typeof manager.addRoot, 'function', 'adding explicit root grants is not implemented');
-  await assert.rejects(manager.addRoot({ path: './relative' }), { code: 'INVALID_PATH' });
-  assert.deepEqual(await manager.listRoots(), []);
-});
-
-test('returned root metadata cannot mutate the server-side grant', async t => {
+test('the single browsing root is opened once with its canonical path, identity and label', async t => {
   const { manager, grant, root } = await fixture(t);
-  grant.path = '/not-the-authorized-root';
-  const roots = await manager.listRoots();
-  assert.equal(roots[0].path, root);
+  assert.equal(typeof manager.getRoot, 'function', 'the fixed browsing root is not implemented');
+  assert.equal(grant.path, root);
+  assert.equal(grant.path, await realpath(root), 'the reported path is the canonical one');
+  assert.equal(grant.identity, await directoryIdentity(root));
+  assert.equal(grant.label, path.basename(root));
+  assert.equal(typeof grant.id, 'string');
+  assert.ok(grant.id.length > 0, 'the root carries a non-empty id');
+  assert.deepEqual(Object.keys(grant).sort(), ['id', 'identity', 'label', 'path'],
+    'the descriptor is exactly the frozen four fields');
+});
+
+test('the root id is bound to the canonical path identity, not to a construction order', async t => {
+  const { grant, root, base } = await fixture(t);
+  const other = path.join(base, 'other');
+  await mkdir(other);
+  const second = createManager({ rootPath: root });
+  const third = createManager({ rootPath: other });
+  t.after(async () => { await second.close(); await third.close(); });
+  // Same directory, same identity: a restart observes the same id with no stored
+  // grant at all, and a different directory never borrows it.
+  assert.equal(typeof grant.id, 'string');
+  assert.equal(second.getRoot().id, grant.id, 'the same directory keeps its id across managers');
+  assert.notEqual(third.getRoot().id, grant.id, 'a different directory gets a different id');
+  assert.notEqual(third.getRoot().identity, grant.identity);
+});
+
+test('returned root metadata is a copy and cannot mutate the server-side root', async t => {
+  const { manager, root } = await fixture(t);
+  const observed = manager.getRoot();
+  const authorizedId = observed.id;
+  observed.path = '/not-the-authorized-root';
+  observed.id = 'forged';
+  const current = manager.getRoot();
+  assert.equal(current.path, root, 'mutating a returned descriptor must not move the root');
+  assert.equal(current.id, authorizedId, 'mutating a returned descriptor must not re-bind its id');
+  assert.notEqual(current, observed, 'each call returns a fresh copy');
 });
 
 test('listing sorts directories first and numbers naturally', async t => {
@@ -112,13 +135,19 @@ test('file reads do not follow directory or leaf symlinks outside a grant', asyn
   await assert.rejects(manager.readText({ rootId: grant.id, path: 'linked-file' }), { code: 'UNSUPPORTED_ENTRY' });
 });
 
-test('a replacement directory at the old root path does not inherit the grant', async t => {
+test('a replacement directory at the root path is refused instead of adopting a new identity', async t => {
   const { manager, grant, base, root } = await fixture(t);
   await rename(root, path.join(base, 'old-root'));
   await mkdir(root);
-  await writeFile(path.join(root, 'new.txt'), 'not granted');
+  await writeFile(path.join(root, 'new.txt'), 'not the opened root');
   assert.equal(typeof manager.list, 'function', 'root identity verification is not implemented');
   await assert.rejects(manager.list({ rootId: grant.id, path: '' }), { code: 'ROOT_CHANGED' });
+  // The descriptor keeps the identity it opened with: a replacement directory is
+  // never silently re-bound, and no new id appears for the same spelling.
+  assert.equal(manager.getRoot().id, grant.id);
+  assert.equal(manager.getRoot().identity, await directoryIdentity(path.join(base, 'old-root')));
+  assert.notEqual(manager.getRoot().identity, await directoryIdentity(root));
+  await assert.rejects(manager.readText({ rootId: grant.id, path: 'new.txt' }), { code: 'ROOT_CHANGED' });
 });
 
 test('internal directory leases hold safe descriptors and reject a replaced root', async t => {
@@ -202,15 +231,17 @@ test('staged writes reject stale overwrite versions without publishing or leakin
   assert.deepEqual(await readdir(root), ['file']);
 });
 
-test('stream publication refuses revoked grants and cleans its held-parent staging', async t => {
-  const { manager, grant, root } = await fixture(t);
+test('stream publication into a replaced root is refused and cleans its held-parent staging', async t => {
+  const { manager, grant, root, base } = await fixture(t);
   assert.equal(typeof manager.io?.createStagedFile, 'function', 'safe staging writes are missing');
   const stage = await manager.io.createStagedFile({ rootId: grant.id, path: 'file' });
   await stage.write(Buffer.from('draft'));
-  await manager.removeRoot({ rootId: grant.id });
-  await assert.rejects(stage.commit(), { code: 'ROOT_NOT_FOUND' });
+  await rename(root, path.join(base, 'old-root'));
+  await mkdir(root);
+  await assert.rejects(stage.commit(), { code: 'ROOT_CHANGED' });
   await stage.abort();
-  assert.deepEqual(await readdir(root), []);
+  assert.deepEqual(await readdir(root), [], 'a replaced root must never receive staged bytes');
+  assert.deepEqual(await readdir(path.join(base, 'old-root')), [], 'its owned staging file must still be cleaned up');
 });
 
 test('content validation happens before staged bytes become visible', async t => {
@@ -318,12 +349,119 @@ test('manager shutdown aborts uncommitted staging before resolving', async t => 
   await assert.rejects(stage.commit(), { code: 'SERVICE_STOPPED' });
 });
 
-test('removing a root revokes access but leaves its files on disk', async t => {
+test('the fixed root is the only one, and root management is gone', async t => {
   const { manager, grant, root } = await fixture(t);
   await writeFile(path.join(root, 'keep.txt'), 'keep');
-  assert.equal(typeof manager.removeRoot, 'function', 'root revocation is not implemented');
-  await manager.removeRoot({ rootId: grant.id });
+  for (const removed of ['addRoot', 'removeRoot', 'listRoots', 'reauthorizeRoot', 'rootStatuses']) {
+    assert.equal(manager[removed], undefined, `${removed} must not exist: directory locations were removed`);
+  }
+  assert.deepEqual(manager.getRoot(), grant, 'the only root stays the one opened at construction');
   assert.equal(await readFile(path.join(root, 'keep.txt'), 'utf8'), 'keep');
-  assert.deepEqual(await manager.listRoots(), []);
-  await assert.rejects(manager.list({ rootId: grant.id, path: '' }), { code: 'ROOT_NOT_FOUND' });
+});
+
+/* ------------------------------------------------------------------ *
+ * One immutable root
+ *
+ * The browsing boundary is decided once, at construction, and is never adopted
+ * from stored state. A container rebuild that changes the directory's `dev:ino`
+ * must be refused rather than silently re-bound, and an id minted by another
+ * process (or another directory) must never address the current root.
+ * ------------------------------------------------------------------ */
+
+test('an id from another process or another directory is refused and never re-bound', async t => {
+  const { manager, grant, root, outside } = await fixture(t);
+  await writeFile(path.join(root, 'file.txt'), 'content');
+  const other = createManager({ rootPath: outside });
+  t.after(() => other.close());
+  const foreign = [
+    'root-1', grant.id.slice(0, 8), `${grant.id} `, other.getRoot().id,
+    createHash('sha256').update(`${root}\u0000stale-identity`).digest('hex').slice(0, 32),
+  ];
+  for (const rootId of foreign) {
+    await assert.rejects(manager.list({ rootId, path: '' }), { code: 'ROOT_NOT_FOUND', status: 404 }, String(rootId));
+    await assert.rejects(manager.readText({ rootId, path: 'file.txt' }), { code: 'ROOT_NOT_FOUND', status: 404 });
+    await assert.rejects(manager.io.stat({ rootId, path: 'file.txt' }), { code: 'ROOT_NOT_FOUND', status: 404 });
+    await assert.rejects(manager.io.createStagedFile({ rootId, path: 'new.txt' }), { code: 'ROOT_NOT_FOUND', status: 404 });
+  }
+  assert.equal(manager.getRoot().id, grant.id, 'a refused id must not move the fixed root');
+  assert.deepEqual(await readdir(root), ['file.txt'], 'a refused id must not create anything');
+});
+
+test('a root that changes identity is refused by every entry point, including held handles', async t => {
+  const { manager, grant, root, base } = await fixture(t);
+  await writeFile(path.join(root, 'bytes'), 'bytes');
+  const version = (await manager.io.stat({ rootId: grant.id, path: 'bytes' })).version;
+  const lease = await manager.io.acquireDirectory({ rootId: grant.id, path: '' });
+  await rename(root, path.join(base, 'old-root'));
+  await mkdir(root);
+  try {
+    await assert.rejects(lease.verify(), { code: 'ROOT_CHANGED', status: 409 });
+    await assert.rejects(lease.entries(), { code: 'ROOT_CHANGED', status: 409 });
+  } finally { await lease.close(); }
+  await assert.rejects(manager.list({ rootId: grant.id, path: '' }), { code: 'ROOT_CHANGED', status: 409 });
+  await assert.rejects(manager.io.stat({ rootId: grant.id, path: 'bytes' }), { code: 'ROOT_CHANGED', status: 409 });
+  await assert.rejects(manager.stat({ rootId: grant.id, path: 'bytes' }), { code: 'ROOT_CHANGED', status: 409 });
+  await assert.rejects(manager.readText({ rootId: grant.id, path: 'bytes' }), { code: 'ROOT_CHANGED', status: 409 });
+  await assert.rejects(manager.createFile({ rootId: grant.id, path: 'new.txt' }), { code: 'ROOT_CHANGED', status: 409 });
+  await assert.rejects(manager.createDirectory({ rootId: grant.id, path: 'new-dir' }), { code: 'ROOT_CHANGED', status: 409 });
+  await assert.rejects(manager.rename({ rootId: grant.id, path: 'bytes', name: 'renamed', expectedVersion: version }), { code: 'ROOT_CHANGED', status: 409 });
+  assert.deepEqual(await readdir(root), [], 'the replacement directory must receive nothing');
+  assert.deepEqual(await readdir(path.join(base, 'old-root')), ['bytes'], 'and the original tree is left untouched');
+});
+
+test('a root that disappears is reported as unavailable, never reopened silently', async t => {
+  const { manager, grant, root } = await fixture(t);
+  await rm(root, { recursive: true });
+  await assert.rejects(manager.list({ rootId: grant.id, path: '' }), { code: 'ROOT_UNAVAILABLE', status: 409 });
+  await assert.rejects(manager.readText({ rootId: grant.id, path: 'file.txt' }), { code: 'ROOT_UNAVAILABLE', status: 409 });
+  assert.equal(manager.getRoot().identity, grant.identity, 'the descriptor keeps the identity it opened with');
+});
+
+test('a root that cannot be opened fails construction synchronously', async t => {
+  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-open-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const file = path.join(base, 'file');
+  await writeFile(file, 'not a directory');
+  const real = path.join(base, 'real');
+  await mkdir(path.join(real, 'nested'), { recursive: true });
+  const link = path.join(base, 'link');
+  await symlink(real, link);
+  for (const rootPath of ['relative/path', '', ' ', 42, '/tmp/\u0000bad', '/tmp/bad\nname']) {
+    assert.throws(() => createManager({ rootPath }), { code: 'INVALID_STATE', status: 500 }, JSON.stringify(rootPath));
+  }
+  for (const rootPath of [path.join(base, 'missing'), file, link]) {
+    assert.throws(() => createManager({ rootPath }), { code: 'ROOT_UNAVAILABLE', status: 500 }, rootPath);
+  }
+  // The refusal carries the OS cause, so a Host can explain the degradation.
+  const causeOf = rootPath => {
+    try { createManager({ rootPath }); } catch (error) { return error.details?.cause; }
+    return assert.fail(`${rootPath} must not construct a manager`);
+  };
+  assert.equal(causeOf(path.join(base, 'missing')), 'ENOENT');
+  assert.equal(causeOf(file), 'ENOTDIR');
+  // O_NOFOLLOW makes a symlinked leaf fail as a non-directory, not as a loop.
+  assert.equal(causeOf(link), 'ENOTDIR');
+  // A symlinked *ancestor* is followed, and the reported path is the canonical one.
+  const through = createManager({ rootPath: path.join(link, 'nested') });
+  t.after(() => through.close());
+  assert.equal(through.getRoot().path, await realpath(path.join(real, 'nested')));
+});
+
+test('the default root is the process filesystem root, addressed without a trailing slash', async t => {
+  const manager = createManager();
+  t.after(() => manager.close());
+  const root = manager.getRoot();
+  assert.equal(root.path, '/');
+  assert.equal(root.label, '/');
+  assert.match(root.identity, /^\d+:\d+$/);
+  assert.equal(root.id, createHash('sha256').update(`${root.path}\u0000${root.identity}`).digest('hex').slice(0, 32),
+    'the id is the canonical path and the observed identity, so the same directory restarts with the same id');
+});
+
+test('a closed manager refuses root addressing before it can report an unknown root', async t => {
+  const { manager, grant } = await fixture(t);
+  await manager.close();
+  assert.throws(() => manager.getRoot(), { code: 'SERVICE_STOPPED', status: 503 });
+  await assert.rejects(manager.list({ rootId: grant.id, path: '' }), { code: 'SERVICE_STOPPED', status: 503 });
+  await assert.rejects(manager.list({ rootId: 'unknown', path: '' }), { code: 'SERVICE_STOPPED', status: 503 });
 });

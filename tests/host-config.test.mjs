@@ -170,11 +170,15 @@ test('the plugin declares every limit as an exported Config schema', async () =>
 
 test('the Host plugin injects only services DSH 0.1.7-rc.1 still provides', async () => {
   const module = await plugin();
-  for (const service of ['connection', 'workspaceRegistry', 'storageDomain']) {
-    assert.ok(module.inject.includes(service), `the plugin still depends on ${service}`);
-  }
+  // Exactly the two dependencies the fixed-root Host still needs, in order.
+  // `workspaceRegistry` was only read to offer workspace directories as
+  // locations, so waiting on it would keep a dependency on a removed feature.
+  assert.deepEqual([...module.inject], ['connection', 'storageDomain'],
+    'a Host plugin may only declare the services it actually uses');
   assert.equal(module.inject.includes('settings'), false,
     'settings no longer carries namespace registration, so the plugin must not wait on it');
+  assert.equal(module.inject.includes('workspaceRegistry'), false,
+    'workspace candidates are no longer a source of browsable directories');
 });
 
 test('the config section identity is the bundle row id', async () => {

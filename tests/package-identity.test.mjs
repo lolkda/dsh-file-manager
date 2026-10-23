@@ -54,15 +54,18 @@ test('the npm package identity is consistent across every declaration', async ()
 test('renaming the package must not touch the kebab-case namespace or the storage units', async () => {
   assert.match(patch, /id: local-file-manager/, 'the bundle unit id stays kebab-case');
 
-  // The three names are frozen in the contract layer and declared exactly once there.
-  const frozen = ['local-file-manager', 'local_file_manager', 'local_file_manager_operations'];
+  // The surviving names are frozen in the contract layer and declared exactly once
+  // there. The root-grant storage namespace was removed with the locations it held,
+  // so it must be absent from the contract rather than merely unreferenced.
+  const frozen = ['local-file-manager', 'local_file_manager_operations'];
   const contract = await firstExisting(['dist/contracts/limits.js', 'src/contracts/limits.ts']);
   assert.ok(contract, 'the limits contract must be built or present in source');
   for (const name of frozen) {
     assert.ok(contract.text.includes(`'${name}'`), `${name} must be declared in the limits contract`);
   }
-  assert.ok(frozen.includes('local-file-manager') && frozen.includes('local_file_manager'),
-    'Settings stays kebab-case while Storage stays snake_case');
+  assert.equal(contract.text.includes("'local_file_manager'"), false,
+    'the retired root-grant storage namespace must not survive in the limits contract');
+  assert.ok(frozen.includes('local-file-manager'), 'the settings namespace stays kebab-case');
 
   // No shipped half may invent a second namespace: every namespace-shaped literal it
   // carries must be one of the frozen three, whether it imports the constant or not.

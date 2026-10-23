@@ -50,7 +50,6 @@ export interface OpenDocument {
   readonly dirty: boolean;
   readonly external: FileSnapshot | null;
   readonly missing: boolean;
-  readonly editing: boolean;
   readonly saving: boolean;
   /** Save/read generation; deletion also invalidates every older response. */
   readonly attempt: number;
@@ -207,7 +206,7 @@ export function createDocumentStore(): DocumentStore {
         ...state.documents,
         {
           id, rootId: next.rootId, path: next.path, base: next, draft: normalize(next.text),
-          dirty: false, external: null, missing: false, editing: false, saving: false, attempt: 0,
+          dirty: false, external: null, missing: false, saving: false, attempt: 0,
         },
       ], activate ? id : state.activeId);
       return id;
@@ -215,7 +214,7 @@ export function createDocumentStore(): DocumentStore {
 
     edit(id, text) {
       if (typeof text !== 'string') invalid('INVALID_TEXT', 'The editor draft must be text.');
-      update(id, document => ({ ...document, draft: text, dirty: text !== normalize(document.base.text), editing: true }));
+      update(id, document => ({ ...document, draft: text, dirty: text !== normalize(document.base.text) }));
     },
 
     saving(id, saving) {

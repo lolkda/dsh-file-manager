@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, realpathSync } from 'node:fs';
 import type { BigIntStats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
@@ -12,31 +12,37 @@ import {
   chargeVerification, createIO, createVerificationBudget,
   type EntryKind, type EntryView, type RootPathRef, type UnaddressableEntry, type VerificationBudget,
 } from './io.js';
-import { renameNoReplace } from './atomic-rename.js';
+import { renameCompatibilityAvailable, renameNoReplace } from './atomic-rename.js';
 import type { HeavyIoScheduler } from './scheduler.js';
 
 const DIRECTORY_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 const names = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+/** The browsable root every manager is built around. */
+export const ROOT_PATH_DEFAULT = '/';
 
-/** A stored root grant. Frozen once persisted; never silently repaired. */
+/**
+ * The one directory a manager browses, resolved once at construction.
+ *
+ * This is not a grant: there is no way to add, remove, re-authorize or persist
+ * one. `id` is derived from `identity` and the canonical path, so a path whose
+ * `dev:ino` or canonical form differs reports a different id.
+ */
 export interface RootDescriptor {
-  id: string;
-  provider: 'host-local';
-  path: string;
-  label: string;
-  identity: string;
-  createdAt: string;
-}
-
-export interface RootPathInput {
-  rootId?: unknown;
-  path?: string | undefined;
+  readonly id: string;
+  readonly path: string;
+  readonly label: string;
+  readonly identity: string;
 }
 
 export interface ManagerOptions {
-  initialRoots?: readonly RootDescriptor[] | undefined;
-  persistRoots?: ((roots: RootDescriptor[]) => Promise<void>) | undefined;
+  /**
+   * The directory to browse. Defaults to `/`; an isolated directory is for
+   * embedded and verification callers only and is not a plugin setting. The path
+   * is opened and identity-checked here, so an unusable root fails at
+   * construction instead of answering requests it cannot serve.
+   */
+  rootPath?: string | undefined;
   now?: (() => number) | undefined;
   deletePlanTtlMs?: number | undefined;
   maxTextBytes?: number | undefined;
@@ -98,7 +104,6 @@ interface DeletePlan {
 
 const identity = (stat: BigIntStats): string => `${stat.dev}:${stat.ino}`;
 const stamp = (stat: BigIntStats): string => `${identity(stat)}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-const descriptor = (root: RootDescriptor): RootDescriptor => ({ ...root });
 
 /**
  * The root-relative path grammar, reported rather than thrown, so a directory
@@ -109,15 +114,59 @@ export function pathViolation(relativePath: unknown, allowRoot = true): string |
   if (relativePath.length > RELATIVE_PATH_MAX_LENGTH) return `it exceeds ${RELATIVE_PATH_MAX_LENGTH} characters`;
   if (/[\x00-\x1f\\]/.test(relativePath)) return 'it contains control characters or a backslash';
   if (path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) return 'it is absolute';
-  if (relativePath === '') return allowRoot ? undefined : 'it names the granted root';
+  if (relativePath === '') return allowRoot ? undefined : 'it names the root';
   if (relativePath.split('/').some(part => part === '' || part === '.' || part === '..')) return 'it contains an empty or dot segment';
   return undefined;
 }
 
+/** A held descriptor's address; never built from an untrusted ancestor path. */
+function fdAddress(fd: number, child = ''): string {
+  if (process.platform !== 'linux') fail('UNSUPPORTED_PLATFORM', 'This release requires a Linux Host.', 422);
+  return `/proc/self/fd/${fd}${child ? `/${child}` : ''}`;
+}
+
 /** Internal paths address held directory descriptors, never untrusted ancestors. */
 function fdPath(handle: FileHandle, child = ''): string {
-  if (process.platform !== 'linux') fail('UNSUPPORTED_PLATFORM', 'This release requires a Linux Host.', 422);
-  return `/proc/self/fd/${handle.fd}${child ? `/${child}` : ''}`;
+  return fdAddress(handle.fd, child);
+}
+
+/**
+ * Resolve the one browsable root, once, at construction.
+ *
+ * The path is opened with `O_DIRECTORY | O_NOFOLLOW` (a link is rejected), its
+ * `dev:ino` is captured, and the canonical path is read back from the held
+ * descriptor instead of being assumed from the requested string. Later operations
+ * re-open the path and re-check both facts; a path whose `dev:ino` or canonical
+ * form has changed is refused rather than adopted.
+ *
+ * A failure is reported as a root failure, not an I/O error: the caller decides
+ * whether the whole surface has to be refused.
+ */
+function snapshotRoot(requestedPath: string): RootDescriptor {
+  if (typeof requestedPath !== 'string' || !path.isAbsolute(requestedPath) || /[\x00-\x1f]/.test(requestedPath)) {
+    fail('INVALID_STATE', 'The configured root path must be an absolute directory path.', 500);
+  }
+  let fd: number | undefined;
+  try {
+    fd = openSync(requestedPath, DIRECTORY_FLAGS);
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isDirectory()) fail('NOT_DIRECTORY', 'The fixed root is not a directory.', 500);
+    const canonical = realpathSync(fdAddress(fd));
+    const observed = identity(stat);
+    return Object.freeze({
+      id: createHash('sha256').update(`${canonical}\u0000${observed}`).digest('hex').slice(0, 32),
+      path: canonical,
+      label: path.basename(canonical) || canonical,
+      identity: observed,
+    });
+  } catch (error) {
+    // A `throw` (not `fail`) keeps the control-flow analysis of this
+    // try/catch/finally honest: every path returns a snapshot or throws.
+    if (error instanceof FileManagerError) throw error;
+    throw new FileManagerError('ROOT_UNAVAILABLE', 'The fixed root could not be opened as a directory.', 500, { cause: (error as NodeJS.ErrnoException).code });
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function partsOf(relativePath: unknown): string[] {
@@ -139,61 +188,90 @@ function kindOf(stat: BigIntStats): EntryKind {
   return 'other';
 }
 
-/** Create a Host-local manager. No Agent or Session is ever acquired. */
+/** Create a Host-local manager over one fixed, non-configurable root. */
 export function createManager(options: ManagerOptions = {}) {
   const {
-    initialRoots = [], persistRoots = async () => {}, now = Date.now,
+    rootPath = ROOT_PATH_DEFAULT, now = Date.now,
     deletePlanTtlMs = LIMIT_DEFAULTS.deletePlanTtlMs,
     maxTextBytes = LIMIT_DEFAULTS.maxTextBytes,
     maxVerificationBytes = LIMIT_DEFAULTS.maxVerificationBytes,
     scheduler,
   } = options;
   if (!Number.isSafeInteger(maxTextBytes) || maxTextBytes < 1 || maxTextBytes > 32 * 1024 * 1024) fail('INVALID_STATE', 'The text size limit is invalid.', 500);
-  const roots = new Map<string, RootDescriptor>();
-  for (const root of initialRoots) {
-    if (!root || typeof root.id !== 'string' || !root.id || root.provider !== 'host-local'
-      || typeof root.path !== 'string' || !path.isAbsolute(root.path)
-      || typeof root.identity !== 'string' || !/^\d+:\d+$/.test(root.identity) || roots.has(root.id)) {
-      fail('INVALID_STATE', 'Stored root grants are invalid; no grants were silently discarded.', 500);
-    }
-    roots.set(root.id, Object.freeze({ ...root }));
-  }
+  // The root is resolved first: without a verified snapshot there is nothing
+  // that could safely answer a request.
+  const root = snapshotRoot(rootPath);
   let mutationTail: Promise<unknown> = Promise.resolve();
+  /**
+   * `close()` has been called: no further work is accepted, while the mutations
+   * already queued still run to completion. Closing is a shutdown, not a
+   * cancellation of work the Host already accepted.
+   */
+  let stopping = false;
+  /** The queued work drained and the I/O resources were released. */
   let closed = false;
   const deletePlans = new Map<string, DeletePlan>();
   const mutate = <T>(operation: () => Promise<T>): Promise<T> => {
-    if (closed) return Promise.reject(new FileManagerError('SERVICE_STOPPED', 'The file manager is stopping.', 503));
+    if (stopping) return Promise.reject(new FileManagerError('SERVICE_STOPPED', 'The file manager is stopping.', 503));
     const result = mutationTail.then(operation);
     mutationTail = result.catch(() => {});
     return result;
   };
 
-  function rootOf(rootId: unknown): RootDescriptor {
-    if (typeof rootId !== 'string' || !roots.has(rootId)) fail('ROOT_NOT_FOUND', 'The root grant no longer exists.', 404);
-    return roots.get(rootId as string) as RootDescriptor;
+  /**
+   * Guard the entry points that read the root for a caller, not the work already
+   * accepted: every mutation queued before `close()` keeps using the root while
+   * it drains, so this must not be consulted on that path.
+   */
+  function assertOpen(): void {
+    if (closed) fail('SERVICE_STOPPED', 'The file manager is closed.', 503);
   }
 
-  /** Open and identity-check the granted root before walking any descendants. */
-  async function openRoot(root: RootDescriptor): Promise<FileHandle> {
+  /** The frozen root snapshot, copied so a caller cannot rewrite it in place. */
+  function getRoot(): RootDescriptor {
+    assertOpen();
+    return { ...root };
+  }
+
+  /**
+   * Resolve a caller-supplied root id against the one root.
+   *
+   * A reference dropped by any other root — an older identity of this path,
+   * another directory, or an id this manager did not mint — is refused instead of
+   * being rebound. Task history and drafts therefore keep addressing what they
+   * were created against, and stop resolving once that is gone.
+   *
+   * This is deliberately not a shutdown check: it runs inside accepted work too.
+   */
+  function rootOf(rootId: unknown): RootDescriptor {
+    if (typeof rootId !== 'string' || rootId !== root.id) {
+      fail('ROOT_NOT_FOUND', 'This reference belongs to a different root and is not rebound.', 404);
+    }
+    return root;
+  }
+
+  /** Open and identity-check the root before walking any of its descendants. */
+  async function openRoot(candidate: RootDescriptor): Promise<FileHandle> {
+    if (candidate !== root) fail('ROOT_CHANGED', 'The root this operation was built for is no longer the current root.', 409);
     let handle: FileHandle | undefined;
     try {
       handle = await fs.open(root.path, DIRECTORY_FLAGS);
       const stat = await handle.stat({ bigint: true });
       const actual = await fs.realpath(fdPath(handle));
       if (!stat.isDirectory() || identity(stat) !== root.identity || actual !== root.path) {
-        fail('ROOT_CHANGED', 'The directory at this path is no longer the granted root.', 409);
+        fail('ROOT_CHANGED', 'The directory at the root path is no longer the one this manager opened.', 409);
       }
       return handle;
     } catch (error) {
       if (handle) await handle.close();
       if (error instanceof FileManagerError) throw error;
-      fail('ROOT_UNAVAILABLE', 'The granted directory is unavailable.', 409, { cause: (error as NodeJS.ErrnoException).code });
+      fail('ROOT_UNAVAILABLE', 'The fixed root directory is unavailable.', 409, { cause: (error as NodeJS.ErrnoException).code });
     }
   }
 
   /** Descend via held descriptors and reject symlinks at every user path segment. */
-  async function openDirectory(root: RootDescriptor, parts: readonly string[]): Promise<FileHandle> {
-    let current = await openRoot(root);
+  async function openDirectory(rootCandidate: RootDescriptor, parts: readonly string[]): Promise<FileHandle> {
+    let current = await openRoot(rootCandidate);
     try {
       for (const segment of parts) {
         const address = fdPath(current, segment);
@@ -211,48 +289,8 @@ export function createManager(options: ManagerOptions = {}) {
     }
   }
 
-  async function addRoot({ path: requestedPath }: { path?: unknown } = {}): Promise<RootDescriptor> {
-    return mutate(async () => {
-      if (typeof requestedPath !== 'string' || !path.isAbsolute(requestedPath) || /[\x00-\x1f]/.test(requestedPath)) {
-        fail('INVALID_PATH', 'Adding a root requires an existing absolute directory path.');
-      }
-      const canonical = await fs.realpath(requestedPath);
-      const handle = await fs.open(canonical, DIRECTORY_FLAGS);
-      try {
-        const stat = await handle.stat({ bigint: true });
-        if (!stat.isDirectory()) fail('NOT_DIRECTORY', 'The selected root is not a directory.', 422);
-        if (await fs.realpath(fdPath(handle)) !== canonical) fail('ROOT_CHANGED', 'The directory changed during selection.', 409);
-        for (const root of roots.values()) {
-          if (root.identity === identity(stat) && root.path === canonical) return descriptor(root);
-        }
-        const root: RootDescriptor = Object.freeze({
-          id: randomUUID(), provider: 'host-local', path: canonical,
-          label: path.basename(canonical) || canonical, identity: identity(stat),
-          createdAt: new Date(now()).toISOString(),
-        });
-        await persistRoots([...listRoots(), descriptor(root)]);
-        roots.set(root.id, root);
-        return descriptor(root);
-      } finally {
-        await handle.close();
-      }
-    });
-  }
-
-  function listRoots(): RootDescriptor[] {
-    return [...roots.values()].map(descriptor);
-  }
-
-  async function removeRoot({ rootId }: RootPathInput = {}): Promise<{ rootId: string; removed: true }> {
-    return mutate(async () => {
-      const root = rootOf(rootId);
-      await persistRoots(listRoots().filter(candidate => candidate.id !== root.id));
-      roots.delete(root.id);
-      return { rootId: root.id, removed: true };
-    });
-  }
-
   async function list({ rootId, path: relativePath = '', limit = DIRECTORY_PAGE_DEFAULT, cursor }: ListInput = {}): Promise<ListResult> {
+    assertOpen();
     const parts = partsOf(relativePath);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > DIRECTORY_PAGE_MAX) fail('INVALID_REQUEST', `Page size must be between 1 and ${DIRECTORY_PAGE_MAX}.`);
     const root = rootOf(rootId);
@@ -309,6 +347,8 @@ export function createManager(options: ManagerOptions = {}) {
     rootId: string; path: string; text: string; bytes: number; version: string;
     encoding: 'utf-8'; bom: boolean; newline: ReturnType<typeof detectLineEndings>; mode: number;
   }> {
+    // Also reached from inside a drained write, which runs before `closed` is set.
+    assertOpen();
     const parts = partsOf(relativePath);
     if (!parts.length) fail('UNSUPPORTED_ENTRY', 'Select a regular file for text preview.', 422);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail('INVALID_REQUEST', 'Read limit must be a positive integer.');
@@ -372,7 +412,7 @@ export function createManager(options: ManagerOptions = {}) {
 
   async function withParent<T>(ref: RootPathRef, operation: (location: ParentLocation) => Promise<T>): Promise<T> {
     const parts = partsOf(ref.path);
-    if (!parts.length) fail('ROOT_OPERATION_NOT_ALLOWED', 'The granted root itself cannot be modified or deleted.', 403);
+    if (!parts.length) fail('ROOT_OPERATION_NOT_ALLOWED', 'The root itself cannot be modified or deleted.', 403);
     const root = rootOf(ref.rootId);
     const parent = await openDirectory(root, parts.slice(0, -1));
     const location: ParentLocation = {
@@ -384,7 +424,7 @@ export function createManager(options: ManagerOptions = {}) {
   }
 
   async function verifyParent(location: ParentLocation): Promise<void> {
-    if (rootOf(location.rootId) !== location.root) fail('ROOT_CHANGED', 'The grant changed while the operation was pending.', 409);
+    if (rootOf(location.rootId) !== location.root) fail('ROOT_CHANGED', 'The root this operation was built for is no longer the current root.', 409);
     const current = await openDirectory(location.root, location.parts.slice(0, -1));
     try {
       if (identity(await current.stat({ bigint: true })) !== identity(await location.parent.stat({ bigint: true }))) {
@@ -508,10 +548,14 @@ export function createManager(options: ManagerOptions = {}) {
     }));
   }
 
-  function rename({ rootId, path: relativePath, name, expectedVersion }: {
-    rootId?: unknown; path?: string | undefined; name?: unknown; expectedVersion?: unknown;
+  function rename({ rootId, path: relativePath, name, expectedVersion, allowNonExclusiveRename }: {
+    rootId?: unknown; path?: string | undefined; name?: unknown; expectedVersion?: unknown; allowNonExclusiveRename?: unknown;
   } = {}): Promise<EntryView> {
     return mutate(async () => {
+      if (allowNonExclusiveRename !== undefined && typeof allowNonExclusiveRename !== 'boolean') {
+        fail('INVALID_REQUEST', 'allowNonExclusiveRename must be a boolean when it is present.');
+      }
+      const compatible = allowNonExclusiveRename === true;
       requireVersion(expectedVersion);
       const targetParts = partsOf(name);
       if (targetParts.length !== 1) fail('INVALID_PATH', 'A new name must be one path segment.');
@@ -533,7 +577,26 @@ export function createManager(options: ManagerOptions = {}) {
           : stamp(await fs.lstat(location.address, { bigint: true }));
         if (currentVersion !== expectedVersion) fail('VERSION_CONFLICT', 'The source changed before rename.', 409);
         await absent(destination);
-        await renameNoReplace(location.parent, location.name, location.parent, name as string);
+        try {
+          await renameNoReplace(location.parent, location.name, location.parent, name as string);
+        } catch (error) {
+          if (!compatible || !renameCompatibilityAvailable(error)) throw error;
+          // The helper proved that this filesystem cannot enforce no-replace, and the
+          // caller explicitly accepted the weaker guarantee for this one rename. Every
+          // fact the strict path established is re-proved immediately before the
+          // ordinary rename: the same parent directory, the same source version, and a
+          // destination that still does not exist. The window that remains after this
+          // re-check is exactly the concurrency risk the caller confirmed; the ordinary
+          // rename stays atomic as a rename but no longer promises not to replace a name
+          // another process created in that window.
+          await verifyParent(location);
+          const confirmedVersion = strong
+            ? (await io.stat({ rootId, path: relativePath })).version
+            : stamp(await fs.lstat(location.address, { bigint: true }));
+          if (confirmedVersion !== expectedVersion) fail('VERSION_CONFLICT', 'The source changed before the compatible rename.', 409);
+          await absent(destination);
+          await fs.rename(location.address, destination);
+        }
         try {
           await location.parent.sync();
           return await io.stat({ rootId, path: [...location.parts.slice(0, -1), name as string].join('/') });
@@ -548,13 +611,13 @@ export function createManager(options: ManagerOptions = {}) {
   /** Confirm selected names/identities; never enumerate a selected directory here. */
   async function prepareDelete({ items, signal }: { items?: unknown; signal?: AbortSignal } = {}): Promise<DeletePlanView> {
     if (!Array.isArray(items) || items.length === 0 || items.length > DELETE_PLAN_MAX_SELECTIONS) fail('INVALID_REQUEST', `Select between 1 and ${DELETE_PLAN_MAX_SELECTIONS} entries.`);
-    if (closed) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503);
+    if (stopping) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503);
     for (const [id, plan] of deletePlans) if ((!plan.promise || plan.result) && plan.expiresAt < now()) deletePlans.delete(id);
     if (deletePlans.size >= DELETE_PLAN_MAX_PENDING) fail('TOO_MANY_REQUESTS', 'Too many pending deletion confirmations.', 429);
     const selected = items.map((ref: { rootId?: unknown; path?: unknown }) => {
       if (!ref || typeof ref !== 'object') fail('INVALID_REQUEST', 'Each selected entry must have a root and relative path.');
       const parts = partsOf(ref.path);
-      if (!parts.length) fail('ROOT_OPERATION_NOT_ALLOWED', 'The granted root itself cannot be deleted.', 403);
+      if (!parts.length) fail('ROOT_OPERATION_NOT_ALLOWED', 'The root itself cannot be deleted.', 403);
       const root = rootOf(ref.rootId);
       return { rootId: root.id, path: ref.path as string, absolute: path.join(root.path, ...parts) };
     }).sort((a, b) => a.absolute.length - b.absolute.length || a.absolute.localeCompare(b.absolute));
@@ -573,7 +636,9 @@ export function createManager(options: ManagerOptions = {}) {
       }));
     }
     if (signal?.aborted) fail('CANCELLED', 'Deletion preparation was cancelled.', 499);
-    if (closed) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503);
+    // Not a queued mutation: a preparation that spans a shutdown must not leave a
+    // confirmation behind for a manager that is going away.
+    if (stopping) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503);
     const id = randomUUID();
     const expiresAt = now() + deletePlanTtlMs;
     deletePlans.set(id, { id, targets, entries, expiresAt, promise: null, result: null });
@@ -650,14 +715,18 @@ export function createManager(options: ManagerOptions = {}) {
 
   const io = createIO<RootDescriptor>({
     rootOf, openDirectory, partsOf, pathViolation, fdPath, entryView, stamp, identity, mutate, createDirectory,
-    assertOpen() { if (closed) fail('SERVICE_STOPPED', 'The file manager is stopping.', 503); },
+    assertOpen,
     scheduler,
     maxVerificationBytes,
   });
 
   async function close(): Promise<void> {
-    closed = true;
+    // Stop accepting new work, then let what is already queued finish: an
+    // accepted mutation is a durable promise, not something shutdown cancels.
+    // Reads and I/O entry points only start refusing once the drain is done.
+    stopping = true;
     await mutationTail;
+    closed = true;
     await io.close();
     deletePlans.clear();
   }
@@ -668,7 +737,7 @@ export function createManager(options: ManagerOptions = {}) {
   }
 
   return {
-    addRoot, listRoots, removeRoot, list, readText, stat: io.stat, saveText, createFile, createDirectory, rename,
+    getRoot, list, readText, stat: io.stat, saveText, createFile, createDirectory, rename,
     prepareDelete, commitDelete, io, close, verificationBudget, maxVerificationBytes,
   };
 }

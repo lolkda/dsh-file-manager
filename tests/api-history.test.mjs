@@ -15,7 +15,7 @@ const request = payload => new Request('http://localhost/api/file-manager/v2/con
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-history-api-'));
-  const manager = createManager();
+  const manager = createManager({ rootPath: root });
   let tasks; let transfers;
   t.after(async () => {
     const errors = [];
@@ -24,7 +24,7 @@ async function fixture(t) {
     }
     if (errors.length) throw new AggregateError(errors, 'History fixture cleanup failed.');
   });
-  const grant = await manager.addRoot({ path: root });
+  const grant = manager.getRoot();
   const ref = value => ({ rootId: grant.id, path: value });
   const source = await manager.createFile({ ...ref('source.txt'), text: 'do not delete or re-run this file\n' });
   await manager.createDirectory(ref('destination'));
@@ -46,7 +46,7 @@ async function fixture(t) {
   const downloaded = await transfers.handleDownload(new Request(`http://localhost/api/file-manager/v2/download?taskId=${completed.id}`));
   assert.equal(await downloaded.text(), 'do not delete or re-run this file\n');
   const queued = await transfers.begin({ direction: 'download', ...ref('source.txt') });
-  const control = createControlHandler({ manager, tasks, transfers, workspaces: () => [] });
+  const control = createControlHandler({ manager, tasks, transfers });
   const call = payload => control(request({ requestId: randomUUID(), ...payload }));
   const item = (kind, taskId, expectedHistoryRevision = 0) => ({ kind, taskId, expectedHistoryRevision });
   return { root, manager, tasks, transfers, completed, queued, call, control, item, savedTasks, savedTransfers, checkpoint, rejectTaskSave: () => { rejectTaskSave = true; } };
@@ -55,7 +55,7 @@ async function fixture(t) {
 test('bootstrap advertises task-history actions only when composed services implement them', async t => {
   const f = await fixture(t);
   assert.equal((await (await f.call({ op: 'bootstrap' })).json()).value.capabilities.taskHistory, true);
-  const readOnly = createControlHandler({ manager: f.manager, workspaces: () => [] });
+  const readOnly = createControlHandler({ manager: f.manager });
   assert.equal((await (await readOnly(request({ op: 'bootstrap' }))).json()).value.capabilities.taskHistory, false);
 });
 

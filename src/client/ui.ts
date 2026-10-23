@@ -11,6 +11,7 @@
 import type { ComponentType, ReactNode } from 'react';
 
 export type PrimitiveProps = Record<string, unknown> & { children?: ReactNode };
+export type ClipboardWriter = (text: string) => Promise<boolean>;
 
 // Exact subset of the installed Menu declaration used by the paste dialog.
 // Unlike native select, the shared Menu owns its themed popup and positioning.
@@ -28,11 +29,13 @@ export interface PrimitiveMenuProps {
 
 export interface UiPrimitives {
   readonly Button: ComponentType<PrimitiveProps>;
+  readonly IconCloseOutlineRegular: ComponentType<PrimitiveProps>;
   readonly Menu: ComponentType<PrimitiveMenuProps>;
   readonly Input: ComponentType<PrimitiveProps>;
   readonly Modal: ComponentType<PrimitiveProps>;
   readonly Checkbox: ComponentType<PrimitiveProps>;
   readonly RiskConfirmation: ComponentType<PrimitiveProps>;
+  readonly writeClipboard?: ClipboardWriter;
   /**
    * Host-public filename→grammar selection for the code editor. Optional because
    * a Host composed without the primitives' code-highlighting surface must keep

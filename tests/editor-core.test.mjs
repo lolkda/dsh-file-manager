@@ -386,7 +386,6 @@ const BASE_PROPS = Object.freeze({
   documentId: 'doc-1',
   path: 'src/a.ts',
   value: '',
-  mode: 'edit',
   canWrite: true,
   languageHint: 'typescript',
   ariaLabel: 'Text editor: src/a.ts',
@@ -506,7 +505,7 @@ function breakParser(parser, t) {
 
 /** The control the user is left with after a degradation. */
 function fallbackOf(host) {
-  return host.querySelector('[data-fm-code-fallback="edit"]');
+  return host.querySelector('[data-fm-code-fallback]');
 }
 
 /**
@@ -584,18 +583,18 @@ test('the rendered editor mirrors the frozen editable and read-only matrix', asy
   // Both a preview and a Host that grants no write access are non-editable:
   // the surface is still selectable and announced as read-only, but it cannot be
   // typed into, so it must not advertise itself as editable.
-  const preview = await scene.mount({ mode: 'preview', value: 'read only' });
+  const preview = await scene.mount({ canWrite: false, value: 'read only' });
   const previewContent = preview.host().querySelector('.cm-content');
   assert.equal(previewContent.getAttribute('contenteditable'), 'false', 'a preview is not editable');
   assert.equal(previewContent.getAttribute('aria-readonly'), 'true', 'a preview must announce that it is read-only');
   assert.equal(readEditorText(preview.host()), 'read only');
 
-  const writable = await scene.mount({ mode: 'edit', canWrite: true });
+  const writable = await scene.mount({ canWrite: true });
   const writableContent = writable.host().querySelector('.cm-content');
   assert.equal(writableContent.getAttribute('contenteditable'), 'true');
   assert.notEqual(writableContent.getAttribute('aria-readonly'), 'true', 'a writable editor must not claim to be read-only');
 
-  const readOnly = await scene.mount({ mode: 'edit', canWrite: false });
+  const readOnly = await scene.mount({ canWrite: false });
   const readOnlyContent = readOnly.host().querySelector('.cm-content');
   assert.equal(readOnlyContent.getAttribute('contenteditable'), 'false', 'a Host without the write capability cannot expose an editable surface');
   assert.equal(readOnlyContent.getAttribute('aria-readonly'), 'true');
@@ -632,16 +631,16 @@ test('re-supplying the identical draft neither rebuilds the view nor loses the s
   assert.deepEqual(view.changes, [], 'a repeated value is not an edit');
 });
 
-test('switching mode reconfigures the live view instead of remounting it', async t => {
-  const view = await mountEditor(t, { value: 'unchanged', mode: 'edit' });
+test('changing write permission reconfigures the live view instead of remounting it', async t => {
+  const view = await mountEditor(t, { value: 'unchanged', canWrite: true });
   const before = editorViewOf(view.host());
 
-  await view.render({ mode: 'preview' });
-  assert.equal(editorViewOf(view.host()), before, 'mode is a configuration change, not a new editor');
+  await view.render({ canWrite: false });
+  assert.equal(editorViewOf(view.host()), before, 'write permission is a configuration change, not a new editor');
   assert.equal(view.host().querySelector('.cm-content').getAttribute('contenteditable'), 'false');
   assert.equal(readEditorText(view.host()), 'unchanged');
 
-  await view.render({ mode: 'edit' });
+  await view.render({ canWrite: true });
   assert.equal(editorViewOf(view.host()), before);
   assert.equal(view.host().querySelector('.cm-content').getAttribute('contenteditable'), 'true');
   assert.equal(readEditorText(view.host()), 'unchanged');
@@ -975,8 +974,8 @@ test('a failed dispatch never fabricates an edit event', async t => {
   // Degrading must not look like an edit: a failed transaction commits nothing,
   // and a surface the user cannot type into has no edit to report at all.
   const scene = await editorScene(t);
-  const readOnly = await scene.mount({ mode: 'edit', canWrite: false, value: 'read only' });
-  const preview = await scene.mount({ mode: 'preview', value: 'preview text' });
+  const readOnly = await scene.mount({ canWrite: false, value: 'read only' });
+  const preview = await scene.mount({ canWrite: false, value: 'preview text' });
   const editable = await scene.mount({ value: 'same' });
   // Mounted while healthy, then broken, so the failure lands on a real dispatch.
   breakParser(scene.client.codeLanguages.languageExtensionFor('typescript', 'src/a.ts').language.parser, t);
@@ -1032,18 +1031,19 @@ test('the degraded fallback of a read-only view does not report input', async t 
   // to report, exactly as the CodeMirror path and the fallback's own save key
   // already gate on it.
   const scene = await editorScene(t);
-  const view = await scene.mount({ mode: 'edit', canWrite: false, value: 'read only' });
+  const view = await scene.mount({ canWrite: false, value: 'read only' });
   breakParser(scene.client.codeLanguages.languageExtensionFor('typescript', 'src/a.ts').language.parser, t);
   await dispatchEditor(view.host(), { changes: { from: 0, to: 0, insert: 'x' } });
 
   const fallback = fallbackOf(view.host());
   assert.ok(fallback, 'the readable fallback must take over');
-  assert.equal(fallback.readOnly, true, 'a Host without the write capability keeps it read-only');
+  assert.equal(fallback.tagName, 'PRE', 'a Host without write permission gets no editable fallback');
+  assert.equal(fallback.textContent, 'read only');
   assert.deepEqual(view.changes, [], 'the failed dispatch must not report an edit either');
 
-  await typeInFallback(view, fallback, 'typed anyway');
+  await act(async () => fallback.dispatchEvent(new view.handle.window.Event('input', { bubbles: true })));
   assert.deepEqual(view.changes, [], 'input on a read-only fallback must not be reported as an edit');
-  assert.equal(fallbackOf(view.host()).value, 'read only', 'and the text must not appear to have been accepted');
+  assert.equal(fallbackOf(view.host()).textContent, 'read only', 'and the text must not appear to have been accepted');
 });
 
 test('the editing surface declares itself focusable without intercepting Tab', async t => {
@@ -1053,7 +1053,7 @@ test('the editing surface declares itself focusable without intercepting Tab', a
   // real browser then tabs into it is unverified here, because jsdom's `focus()`
   // succeeds on any element and this machine has no browser to measure it with.
   const scene = await editorScene(t);
-  const preview = await scene.mount({ mode: 'preview', value: 'read only' });
+  const preview = await scene.mount({ canWrite: false, value: 'read only' });
   const previewContent = preview.host().querySelector('.cm-content');
   assert.equal(previewContent.getAttribute('tabindex'), '0', 'a preview must declare itself reachable');
   assert.equal(previewContent.getAttribute('contenteditable'), 'false', 'and must stay non-editable');
@@ -1081,7 +1081,7 @@ test('the save shortcut reports through onSave and is suppressed for a preview',
   assert.deepEqual(editable.saves, [true], 'Ctrl+S must reach the owner callback');
   assert.equal(event.defaultPrevented, true, 'the browser save dialog must be suppressed');
 
-  const preview = await scene.mount({ mode: 'preview', value: 'x' });
+  const preview = await scene.mount({ canWrite: false, value: 'x' });
   const previewContent = preview.host().querySelector('.cm-content');
   const previewEvent = new preview.handle.window.KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true });
   await act(async () => { previewContent.dispatchEvent(previewEvent); });

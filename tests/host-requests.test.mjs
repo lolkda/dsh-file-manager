@@ -10,7 +10,7 @@ test('a mutation without a usable requestId is refused before anything runs', as
   const ledger = createRequestLedger();
   let ran = 0;
   for (const requestId of ['', 'short', 'x'.repeat(129), 7, null, undefined, { id: 'a'.repeat(8) }]) {
-    const { error } = await outcome(Promise.resolve().then(() => ledger.run(requestId, { op: 'roots.add' }, async () => { ran++; })));
+    const { error } = await outcome(Promise.resolve().then(() => ledger.run(requestId, { op: 'entries.create-file' }, async () => { ran++; })));
     assert.equal(error.code, 'INVALID_REQUEST', `requestId ${JSON.stringify(requestId)} must be refused`);
     assert.equal(error.status, 400);
   }
@@ -33,20 +33,20 @@ test('replaying a requestId with the same payload returns the original promise a
 
 test('the fingerprint ignores field order but not a changed payload', async () => {
   const ledger = createRequestLedger();
-  const reordered = ledger.run('order-insensitive-id', { path: 'a', op: 'roots.add' }, async () => 'first');
-  const sameOperation = ledger.run('order-insensitive-id', { op: 'roots.add', path: 'a' }, async () => 'second');
+  const reordered = ledger.run('order-insensitive-id', { path: 'a', op: 'entries.create-file' }, async () => 'first');
+  const sameOperation = ledger.run('order-insensitive-id', { op: 'entries.create-file', path: 'a' }, async () => 'second');
   assert.equal(await reordered, 'first');
   assert.equal(await sameOperation, 'first', 'the same fields in another order are the same operation');
-  const { error } = await outcome(Promise.resolve().then(() => ledger.run('order-insensitive-id', { op: 'roots.add', path: 'b' }, async () => 'third')));
+  const { error } = await outcome(Promise.resolve().then(() => ledger.run('order-insensitive-id', { op: 'entries.create-file', path: 'b' }, async () => 'third')));
   assert.equal(error.code, 'REQUEST_ID_REUSED');
   assert.equal(error.status, 409);
 });
 
 test('the requestId argument itself is not part of the fingerprint', async () => {
   const ledger = createRequestLedger();
-  const first = await ledger.run('fingerprint-scope-id', { op: 'roots.add', path: 'a', requestId: 'fingerprint-scope-id' }, async () => 'ran');
+  const first = await ledger.run('fingerprint-scope-id', { op: 'entries.create-file', path: 'a', requestId: 'fingerprint-scope-id' }, async () => 'ran');
   assert.equal(first, 'ran');
-  const replay = await ledger.run('fingerprint-scope-id', { op: 'roots.add', path: 'a', requestId: 'fingerprint-scope-id' }, async () => 'again');
+  const replay = await ledger.run('fingerprint-scope-id', { op: 'entries.create-file', path: 'a', requestId: 'fingerprint-scope-id' }, async () => 'again');
   assert.equal(replay, 'ran');
 });
 
@@ -54,9 +54,9 @@ test('a failed operation still settles, so its replay reports the same failure i
   const ledger = createRequestLedger();
   let attempts = 0;
   const failing = async () => { attempts++; throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); };
-  const first = await outcome(ledger.run('failing-request-id', { op: 'roots.add', path: 'a' }, failing));
+  const first = await outcome(ledger.run('failing-request-id', { op: 'entries.create-file', path: 'a' }, failing));
   assert.equal(first.error.code, 'ENOSPC');
-  const replay = await outcome(ledger.run('failing-request-id', { op: 'roots.add', path: 'a' }, failing));
+  const replay = await outcome(ledger.run('failing-request-id', { op: 'entries.create-file', path: 'a' }, failing));
   assert.equal(replay.error.code, 'ENOSPC');
   assert.equal(attempts, 1);
 });

@@ -13,8 +13,8 @@ async function fixture(t, options = {}) {
   const root = path.join(base, 'root');
   const journal = path.join(base, 'history.json');
   await mkdir(root);
-  const manager = createManager();
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
   const services = [];
   const writes = [];
   const progress = [];

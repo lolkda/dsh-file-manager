@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { watch as nativeWatch } from 'node:fs';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -38,8 +38,8 @@ function events(t) {
 async function fixture(t, options = {}) {
   const { createWatchService } = await watchModule();
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-watch-'));
-  const manager = createManager();
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
   const service = createWatchService({ manager, pollIntervalMs: 30, debounceMs: 5, ...options });
   t.after(async () => { await service.close(); await manager.close(); await rm(root, { recursive: true, force: true }); });
   return { root, manager, grant, service, target: { rootId: grant.id, path: '' } };
@@ -81,14 +81,16 @@ test('unsupported native watching falls back to periodic reconciliation', async 
   assert.equal(event.path, '');
 });
 
-test('revoking a root disables its observation instead of following an ungranted path', async t => {
-  const { manager, grant, service, target } = await fixture(t);
+test('a root that changes identity stops observation instead of following the replacement', async t => {
+  const { service, target, root } = await fixture(t);
   const stream = events(t);
   const release = await service.subscribe([target], stream.receive);
   t.after(release);
-  await manager.removeRoot({ rootId: grant.id });
+  await rename(root, `${root}-old`);
+  await mkdir(root);
   const event = await stream.next(value => value.kind === 'watch-status' && value.status === 'unavailable');
-  assert.equal(event.rootId, grant.id);
+  assert.equal(event.rootId, target.rootId);
+  assert.equal(event.code, 'ROOT_CHANGED', 'the replacement directory is never observed in place of the opened root');
 });
 
 test('subscriptions share one OS watcher and release it with the last subscriber', async t => {

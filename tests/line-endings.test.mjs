@@ -10,8 +10,8 @@ async function save(t, before, draft) {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-eol-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'file'), before);
-  const manager = createManager();
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
   const ref = { rootId: grant.id, path: 'file' };
   const opened = await manager.readText(ref);
   const receipt = await manager.saveText({ ...ref, text: draft, expectedVersion: opened.version });

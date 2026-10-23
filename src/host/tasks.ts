@@ -121,7 +121,7 @@ function refOf(ref: unknown, allowRoot = false): TaskRef {
     || (value.path && value.path.split('/').some(part => !part || part === '.' || part === '..'))) {
     fail('INVALID_PATH', 'Expected an authorized root and a relative path.');
   }
-  if (!allowRoot && !value.path) fail('ROOT_OPERATION_NOT_ALLOWED', 'The granted root itself cannot be copied or moved.', 403);
+  if (!allowRoot && !value.path) fail('ROOT_OPERATION_NOT_ALLOWED', 'The root itself cannot be copied or moved.', 403);
   return { rootId: value.rootId, path: value.path };
 }
 
@@ -226,10 +226,13 @@ export function createTaskService(options: TaskServiceOptions): TaskService {
   function accepting(): void { if (stopped) fail('SERVICE_STOPPED', 'The task service is stopping.', 503); }
 
   function logicalPath(ref: TaskRef): string {
-    const grant = manager.listRoots().find(root => root.id === ref.rootId);
-    if (!grant) fail('ROOT_NOT_FOUND', 'The root grant no longer exists.', 404);
+    const root = manager.getRoot();
+    // A task recorded against any other root — an older identity of this path, or
+    // another directory — is refused rather than silently rebound to the current
+    // one, so its recorded intent can never be applied somewhere new.
+    if (ref.rootId !== root.id) fail('ROOT_NOT_FOUND', 'This task belongs to a different root and is not rebound.', 404);
     // Used only for overlap comparison. All filesystem access goes through io capabilities.
-    return path.posix.join(grant.path, ref.path);
+    return path.posix.join(root.path, ref.path);
   }
 
   function statusOf(task: TaskRecord, cancelled = false): TaskStatus {

@@ -35,8 +35,8 @@ async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-fm-safety-'));
   const root = path.join(base, 'root');
   await mkdir(root);
-  const manager = createManager(options);
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ ...options, rootPath: root });
+  const grant = manager.getRoot();
   // Close the manager before removing its directory: an open manager keeps root
   // descriptors and pending plans alive, and teardown must not race them.
   t.after(async () => {
@@ -169,20 +169,6 @@ test('replacing the granted root directory is refused and the original tree surv
   assert.equal(refused.status, 409);
   assert.equal(await readFile(path.join(base, 'root-old', 'note'), 'utf8'), 'note', 'the original tree must survive');
   assert.deepEqual(await readdir(root), [], 'the replacement directory must stay untouched');
-});
-
-test('revoking the root grant while a confirmation is pending is refused', async t => {
-  const { manager, root, grant, ref } = await fixture(t);
-  await writeFile(path.join(root, 'note'), 'note');
-  const plan = await manager.prepareDelete({ items: [ref('note')] });
-
-  await manager.removeRoot({ rootId: grant.id });
-
-  const refused = await rejection(manager.commitDelete({ planId: plan.id, confirmed: true }));
-  assert.ok(refused, 'a revoked grant must not authorize the pending confirmation');
-  assert.equal(refused.code, 'ROOT_NOT_FOUND');
-  assert.equal(refused.status, 404);
-  assert.equal(await readFile(path.join(root, 'note'), 'utf8'), 'note', 'a refused confirmation must delete nothing');
 });
 
 test('a child directory swapped for an outside link after the listing is refused and the outside directory is untouched', async t => {

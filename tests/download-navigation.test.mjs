@@ -94,8 +94,12 @@ async function fixture(t, { filename = '下载说明.txt', bytes = Buffer.from('
     assert.equal(response.status, 200, JSON.stringify(body));
     return body.value;
   };
-  const grant = await control({ op: 'roots.add', path: files });
-  return { ctx, origin, cookie, request, control, grant, files, filename, bytes, failures };
+  // The deployed plugin browses `/` and never manages locations, so the fixture
+  // addresses its isolated tree relative to that one root.
+  const root = (await control({ op: 'bootstrap' })).root;
+  const dirPath = path.relative('/', files);
+  const filePath = path.join(dirPath, filename);
+  return { ctx, origin, cookie, request, control, root, dirPath, filePath, files, filename, bytes, failures };
 }
 
 async function unzip(buffer) {
@@ -121,7 +125,7 @@ async function unzip(buffer) {
 
 test('a cookie-authenticated native GET traverses the deployed bridge and downloads exact file bytes', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t, { bytes: Buffer.alloc(256 * 1024, 0x61) });
-  const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
+  const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.root.id, path: f.filePath });
   const response = await f.request(`/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`, { headers: { 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' } });
   assert.equal(response.status, 200, `the real HTTP bridge rejected a bodyless GET: ${f.failures.map(String).join('; ')}`);
   assert.match(response.headers.get('content-disposition'), /attachment;/);
@@ -136,7 +140,7 @@ test('a cookie-authenticated native GET traverses the deployed bridge and downlo
 
 test('a native directory download preserves ZIP members and empty directories through the deployed bridge', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
-  const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: '' });
+  const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.root.id, path: f.dirPath });
   const response = await f.request(`/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`);
   assert.equal(response.status, 200, f.failures.map(String).join('; '));
   assert.equal(response.headers.get('content-type'), 'application/zip');
@@ -149,7 +153,7 @@ test('a native directory download preserves ZIP members and empty directories th
 
 test('download request-mode fixes do not bypass signed-cookie and cross-site rejection', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
-  const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
+  const task = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.root.id, path: f.filePath });
   const relative = `/api/file-manager/v2/download?taskId=${encodeURIComponent(task.id)}`;
   const unauthorized = await fetch(`${f.origin}${relative}`, { signal: AbortSignal.timeout(5000) });
   assert.equal(unauthorized.status, 401);
@@ -162,9 +166,9 @@ test('download request-mode fixes do not bypass signed-cookie and cross-site rej
 
 test('closing task history through real HTTP requires authentication and never cancels a queued transfer', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t);
-  const finished = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
+  const finished = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.root.id, path: f.filePath });
   await (await f.request(`/api/file-manager/v2/download?taskId=${finished.id}`)).arrayBuffer();
-  const queued = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.grant.id, path: f.filename });
+  const queued = await f.control({ op: 'transfers.begin', direction: 'download', rootId: f.root.id, path: f.filePath });
   const payload = { op: 'activities.dismiss', requestId: 'http-close-history', items: [
     { kind: 'transfer', taskId: finished.id, expectedHistoryRevision: 0 },
     { kind: 'transfer', taskId: queued.id, expectedHistoryRevision: 0 },
@@ -187,12 +191,12 @@ test('closing task history through real HTTP requires authentication and never c
 
 test('text reads use the control route while large saves retain a streamed request body', { timeout: 10000, skip: skipWithoutRuntime }, async t => {
   const f = await fixture(t, { bytes: Buffer.from('original\n') });
-  const snapshot = await f.control({ op: 'text.read', rootId: f.grant.id, path: f.filename });
+  const snapshot = await f.control({ op: 'text.read', rootId: f.root.id, path: f.filePath });
   const text = 'large save without the carrier buffer cap\n'.repeat(8000);
-  const saved = await f.request('/api/file-manager/v2/text', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'save', requestId: randomUUID(), rootId: f.grant.id, path: f.filename, expectedVersion: snapshot.version, text }) });
+  const saved = await f.request('/api/file-manager/v2/text', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'save', requestId: randomUUID(), rootId: f.root.id, path: f.filePath, expectedVersion: snapshot.version, text }) });
   assert.equal(saved.status, 200, await saved.text());
   assert.equal(await readFile(path.join(f.files, f.filename), 'utf8'), text);
-  const obsoleteGet = await f.request(`/api/file-manager/v2/text?rootId=${f.grant.id}&path=${encodeURIComponent(f.filename)}`);
+  const obsoleteGet = await f.request(`/api/file-manager/v2/text?rootId=${f.root.id}&path=${encodeURIComponent(f.filePath)}`);
   assert.equal(obsoleteGet.status, 404, 'unsupported GET must be rejected by dispatch, not throw while constructing a Request body');
   await obsoleteGet.text();
   assert.deepEqual(f.failures, []);

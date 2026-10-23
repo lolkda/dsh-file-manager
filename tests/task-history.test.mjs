@@ -18,9 +18,15 @@ async function fixture(t, { beforePersist, onChange, limits } = {}) {
   const journal = path.join(base, 'journal');
   await Promise.all([source, target, journal].map(directory => mkdir(directory)));
   await writeFile(path.join(source, 'a'), 'AAA');
+  // The Host browses the filesystem root and is never pointed at a directory, so
+  // the fixture addresses its isolated tree the way a user would: relative to
+  // `/`. Every write below therefore still lands inside `base`.
   const manager = createManager();
-  const sourceRoot = await manager.addRoot({ path: source });
-  const targetRoot = await manager.addRoot({ path: target });
+  // One immutable root: the former source and target roots are now sibling
+  // subdirectories inside it.
+  const sourceRoot = manager.getRoot();
+  const targetRoot = sourceRoot;
+  const ref = absolute => ({ rootId: sourceRoot.id, path: path.relative('/', absolute) });
   const services = new Set();
   const managers = new Set([manager]);
   const releases = new Set();
@@ -57,12 +63,12 @@ async function fixture(t, { beforePersist, onChange, limits } = {}) {
     return { reached, release, async pause() { entered(); await waiting; } };
   }
   async function item(relative = 'a') {
-    const ref = { rootId: sourceRoot.id, path: relative };
-    return { ...ref, expectedVersion: (await manager.stat(ref)).version };
+    const target = ref(path.join(source, relative));
+    return { ...target, expectedVersion: (await manager.stat(target)).version };
   }
-  const missing = () => ({ rootId: sourceRoot.id, path: 'missing', expectedVersion: 'missing' });
+  const missing = () => ({ ...ref(path.join(source, 'missing')), expectedVersion: 'missing' });
   async function start(items, operation = 'copy') {
-    return service.start({ operation, items: items ?? [await item()], destination: { rootId: targetRoot.id, path: '' }, conflict: 'skip' });
+    return service.start({ operation, items: items ?? [await item()], destination: ref(target), conflict: 'skip' });
   }
   async function finish(started) {
     const task = await started;
@@ -75,7 +81,7 @@ async function fixture(t, { beforePersist, onChange, limits } = {}) {
     });
     return service.get({ taskId: task.id });
   }
-  return { base, source, target, journalPath, manager, service, sourceRoot, targetRoot, services, managers, notifications, writes, durable, persist, block, item, missing, start, finish };
+  return { base, source, target, journalPath, manager, service, sourceRoot, targetRoot, ref, services, managers, notifications, writes, durable, persist, block, item, missing, start, finish };
 }
 
 // Replacing the derived state with a persisted flag would make an active terminal task dismissible.
@@ -98,8 +104,8 @@ test('dismissing a completed copy changes only durable history and keeps files a
   requireDismiss(f.service);
   const done = await f.finish(f.start());
   const before = structuredClone(f.durable.get(done.id));
-  const sourceVersion = (await f.manager.stat({ rootId: f.sourceRoot.id, path: 'a' })).version;
-  const targetVersion = (await f.manager.stat({ rootId: f.targetRoot.id, path: 'a' })).version;
+  const sourceVersion = (await f.manager.stat(f.ref(path.join(f.source, 'a')))).version;
+  const targetVersion = (await f.manager.stat(f.ref(path.join(f.target, 'a')))).version;
   const hidden = await f.service.dismiss({ taskId: done.id, expectedHistoryRevision: done.historyRevision });
   assert.equal(hidden.dismissed, true);
   assert.equal(hidden.historyRevision, 1);
@@ -113,8 +119,8 @@ test('dismissing a completed copy changes only durable history and keeps files a
   assert.equal(Object.hasOwn(saved, 'canDismiss'), false);
   assert.equal(JSON.stringify(saved.items[0].checkpoint), JSON.stringify(before.items[0].checkpoint));
   assert.equal((await f.service.list()).length, 1, 'dismissal must not erase the historical record');
-  assert.equal((await f.manager.stat({ rootId: f.sourceRoot.id, path: 'a' })).version, sourceVersion);
-  assert.equal((await f.manager.stat({ rootId: f.targetRoot.id, path: 'a' })).version, targetVersion);
+  assert.equal((await f.manager.stat(f.ref(path.join(f.source, 'a')))).version, sourceVersion);
+  assert.equal((await f.manager.stat(f.ref(path.join(f.target, 'a')))).version, targetVersion);
   assert.equal(await readFile(path.join(f.source, 'a'), 'utf8'), 'AAA');
   assert.equal(await readFile(path.join(f.target, 'a'), 'utf8'), 'AAA');
 });
@@ -178,7 +184,7 @@ test('queued and running tasks are never dismissed as if they had finished', { t
   const openRead = f.manager.io.openRead;
   f.manager.io.openRead = async options => {
     const source = await openRead(options);
-    if (!held && options.rootId === f.sourceRoot.id && options.path === 'a') { held = true; await gate.pause(); }
+    if (!held && options.rootId === f.sourceRoot.id && options.path === f.ref(path.join(f.source, 'a')).path) { held = true; await gate.pause(); }
     return source;
   };
   const running = await f.start();
@@ -347,9 +353,11 @@ test('legacy defaults and unknown checkpoint fields survive dismissal and cold r
   legacy.items[0].checkpoint.futureProof = { bytes: [0, 255, 17], text: '原始\u0000证明', canDismiss: 'private-field-must-stay' };
   const checkpointBytes = JSON.stringify(legacy.items[0].checkpoint);
   await writeFile(f.journalPath(done.id), JSON.stringify(legacy));
-  const grants = f.manager.listRoots();
   await f.service.close(); await f.manager.close();
-  const firstManager = createManager({ initialRoots: grants });
+  // A cold restart opens the same fixed root from scratch: nothing about it is
+  // restored from durable state, and the journal's relative paths still address
+  // the same files.
+  const firstManager = createManager();
   f.managers.add(firstManager);
   const initialFrames = [];
   const first = createTaskService({ manager: firstManager, initialTasks: [JSON.parse(await readFile(f.journalPath(done.id), 'utf8'))], persistTask: f.persist, onChange: task => initialFrames.push(task) });
@@ -364,7 +372,7 @@ test('legacy defaults and unknown checkpoint fields survive dismissal and cold r
   await first.dismiss({ taskId: done.id, expectedHistoryRevision: 0 });
   assert.equal(JSON.stringify(f.durable.get(done.id).items[0].checkpoint), checkpointBytes);
   await first.close(); await firstManager.close();
-  const secondManager = createManager({ initialRoots: grants });
+  const secondManager = createManager();
   f.managers.add(secondManager);
   const second = createTaskService({ manager: secondManager, initialTasks: [JSON.parse(await readFile(f.journalPath(done.id), 'utf8'))], persistTask: f.persist });
   f.services.add(second);

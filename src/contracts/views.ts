@@ -112,7 +112,7 @@ export function requireContentVersion(
 
 export const RootIdSchema = z.string().min(1).max(128);
 export const FileNameSchema = z.string().min(1);
-/** An entry name as reported by the engine; the granted root reports an empty name. */
+/** An entry name as reported by the engine; the root reports an empty name. */
 export const EntryNameSchema = z.string();
 export const IsoTimestampSchema = z.iso.datetime();
 /** Epoch milliseconds; the transfer engine stores numeric timestamps. */
@@ -135,7 +135,7 @@ export function entryPathViolation(value: string, allowRoot = true): string | un
   if (value.length > RELATIVE_PATH_MAX_LENGTH) return `it exceeds ${RELATIVE_PATH_MAX_LENGTH} characters`;
   if (/[\x00-\x1f\\]/.test(value)) return 'it contains control characters or a backslash';
   if (value.startsWith('/') || /^[A-Za-z]:/.test(value)) return 'it is absolute';
-  if (value === '') return allowRoot ? undefined : 'it names the granted root';
+  if (value === '') return allowRoot ? undefined : 'it names the root';
   if (value.split('/').some(part => part === '' || part === '.' || part === '..')) return 'it contains an empty or dot segment';
   return undefined;
 }
@@ -153,7 +153,7 @@ export function transferPathViolation(value: string, allowRoot = true): string |
 }
 
 /**
- * A root-relative path field: shape only. The empty string is the granted root,
+ * A root-relative path field: shape only. The empty string is the root,
  * and every grammar rule (traversal, absolute form, dot segments, length) is
  * judged by the engine so the wire keeps `INVALID_PATH` / 400.
  */
@@ -162,8 +162,6 @@ export const EntryPathSchema = z.string();
 export const EntryChildPathSchema = z.string();
 /** A transfer path field: same shape-only rule as {@link EntryPathSchema}. */
 export const TransferPathSchema = z.string();
-/** An absolute path field; only `roots.add` accepts one, and the engine validates it. */
-export const AbsoluteRootPathSchema = z.string();
 /** A single new name; one-segment enforcement belongs to the engine. */
 export const LeafNameSchema = z.string();
 
@@ -277,21 +275,27 @@ export function toPublicError(error: unknown, options: NormalizeOptions = {}): P
  * Root and entry views
  * ------------------------------------------------------------------ */
 
+/**
+ * The one browsable root: the Host's `/`, or the isolated directory an
+ * embedded/verification caller constructed the manager with. It is not a grant:
+ * it cannot be added, removed, re-authorized or persisted, and the Client offers
+ * no operation on it.
+ *
+ * `id` is derived from `identity` and the canonical `path`, so a directory with
+ * the same `dev:ino` at the same canonical path reports the same id across
+ * restarts, and a different pair reports a different id. `identity` is the
+ * `dev:ino` observed for that directory: it is reported so a caller can check the
+ * binding instead of trusting the opaque id.
+ */
 export const RootDescriptorSchema = z.object({
   id: RootIdSchema,
-  provider: z.literal('host-local'),
+  /** Canonical absolute path; `/` for the default root. */
   path: z.string().min(1),
-  label: z.string(),
-  /** `dev:ino` of the granted directory, captured when the grant was added. */
+  /** Display name: the directory's base name; `/` for the default root. */
+  label: z.string().min(1),
   identity: z.string().regex(/^\d+:\d+$/),
-  createdAt: IsoTimestampSchema,
 }).strict();
 export type RootDescriptor = z.infer<typeof RootDescriptorSchema>;
-
-export const WorkspaceCandidateSchema = z.object({
-  id: z.string(), path: z.string(), title: z.string(),
-}).strict();
-export type WorkspaceCandidate = z.infer<typeof WorkspaceCandidateSchema>;
 
 /**
  * A metadata snapshot produced by a directory listing.
@@ -374,10 +378,10 @@ export type PublicEntrySummary = z.infer<typeof PublicEntrySummarySchema>;
  * ------------------------------------------------------------------ */
 
 /**
- * The Host could not open or validate the operation journal while the root
- * grants are trustworthy: browsing and text reads still work, everything that
- * writes is refused, and unavailable history must never be presented as empty
- * history. `readOnly` is a literal so an illegal combination cannot be built.
+ * The Host could not open or validate the operation journal while the fixed root
+ * is browsable: browsing and text reads still work, everything that writes is
+ * refused, and unavailable history must never be presented as empty history.
+ * `readOnly` is a literal so an illegal combination cannot be built.
  */
 export const DegradedOperationsSchema = z.object({
   scope: z.literal('operations'),
@@ -388,11 +392,12 @@ export const DegradedOperationsSchema = z.object({
 }).strict();
 
 /**
- * The root grants themselves are not trustworthy: file access is refused
- * outright and the bootstrap reports no usable roots.
+ * The fixed root itself could not be opened as a directory: file access is
+ * refused outright and the bootstrap reports `root: null`, so the Client has no
+ * location it could present as readable.
  */
-export const DegradedRootsSchema = z.object({
-  scope: z.literal('roots'),
+export const DegradedFilesystemSchema = z.object({
+  scope: z.literal('filesystem'),
   code: z.string().min(1).max(64),
   message: z.string().min(1).max(300),
   readOnly: z.literal(false),
@@ -403,10 +408,10 @@ export const DegradedRootsSchema = z.object({
  * an absent field is not a health signal. Every refusal that follows from a
  * degradation answers `FILE_MANAGER_UNAVAILABLE` / 503 with `details.scope`.
  */
-export const DegradedViewSchema = z.discriminatedUnion('scope', [DegradedOperationsSchema, DegradedRootsSchema]);
+export const DegradedViewSchema = z.discriminatedUnion('scope', [DegradedOperationsSchema, DegradedFilesystemSchema]);
 export type DegradedView = z.infer<typeof DegradedViewSchema>;
 export type DegradedOperations = z.infer<typeof DegradedOperationsSchema>;
-export type DegradedRoots = z.infer<typeof DegradedRootsSchema>;
+export type DegradedFilesystem = z.infer<typeof DegradedFilesystemSchema>;
 
 /* ------------------------------------------------------------------ *
  * Text views
@@ -712,17 +717,15 @@ function optional<T>(key: string, value: T | undefined): Record<string, T> {
  * Projectors
  * ------------------------------------------------------------------ */
 
-/** Project a stored root grant. */
+/** Project the one fixed root. */
 export function toRootDescriptor(root: unknown): RootDescriptor {
-  const record = objectOf(root, 'root grant');
+  const record = objectOf(root, 'root');
   return requireParsed(RootDescriptorSchema, {
-    id: stringField(record, 'id', 'root grant'),
-    provider: requireField(record, 'provider', 'root grant'),
-    path: stringField(record, 'path', 'root grant'),
-    label: stringField(record, 'label', 'root grant'),
-    identity: stringField(record, 'identity', 'root grant'),
-    createdAt: stringField(record, 'createdAt', 'root grant'),
-  }, 'root grant');
+    id: stringField(record, 'id', 'root'),
+    path: stringField(record, 'path', 'root'),
+    label: stringField(record, 'label', 'root'),
+    identity: stringField(record, 'identity', 'root'),
+  }, 'root');
 }
 
 /** Project a listing entry: metadata snapshot only. */

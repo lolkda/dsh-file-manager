@@ -51,7 +51,7 @@ node --test tests/contracts.test.mjs tests/package-identity.test.mjs
 | `LIMIT_DEFAULTS.deletePlanTtlMs` | 300000 |
 | `LIMIT_DEFAULTS.maxVerificationBytes` | 10 GiB（**新增**：单次内容核验预算） |
 | `LIMIT_BOUNDS` / `resolveLimits(configured?)` / `isValidLimitValue(name, value)` | 边界与校验；越界或非整数 → `INVALID_STATE`/500，**不静默 clamp** |
-| `SETTINGS_NAMESPACE` / `STORAGE_NAMESPACE` / `OPERATIONS_STORAGE_NAMESPACE` / `WIRE_STAGE` | `'local-file-manager'` / `'local_file_manager'` / `'local_file_manager_operations'` / `'basic-management'` |
+| `SETTINGS_NAMESPACE` / `OPERATIONS_STORAGE_NAMESPACE` / `WIRE_STAGE` | `'local-file-manager'` / `'local_file_manager_operations'` / `'basic-management'` |
 | `HEAVY_IO_QUEUE_LIMIT` | 64（等待 `transferConcurrency` 许可的队列上限，超额 → `TOO_MANY_REQUESTS`/429） |
 | `CONTROL_ENVELOPE_BYTES` / `MANIFEST_ENVELOPE_BYTES` | 256 KiB / 16 MiB |
 | `MANIFEST_OPS` / `isManifestOp(op)` | `tasks.start`、`tasks.retry`、`transfers.begin` |
@@ -84,11 +84,10 @@ node --test tests/contracts.test.mjs tests/package-identity.test.mjs
 
 ## 2. op 列表
 
-`CONTROL_OPS`（24 个，`/v2/control` 与 `/v2/manifest` 路由共用同一分派）：
+`CONTROL_OPS`（21 个，`/v2/control` 与 `/v2/manifest` 路由共用同一分派）：
 
 ```
 bootstrap
-roots.list | roots.add | roots.remove
 entries.list | entries.stat | entries.reference
 text.read
 entries.create-file | entries.create-directory | entries.rename
@@ -100,17 +99,24 @@ transfers.begin | transfers.list | transfers.get | transfers.cancel | transfers.
 
 `TEXT_OPS`：`save`（仅 `/v2/text`）。
 
-**变更类 op（`MUTATION_OPS`，13 个，必须带 `requestId`）**：
+**变更类 op（`MUTATION_OPS`，11 个，必须带 `requestId`）**：
 
 ```
-roots.add | roots.remove
 entries.create-file | entries.create-directory | entries.rename
 delete.commit | activities.dismiss
 tasks.start | tasks.cancel | tasks.retry
 transfers.begin | transfers.cancel | transfers.retry
 ```
 
-其余 11 个为只读 op：允许携带 `requestId`（Client 统一携带），但不受 ledger 约束。
+其余 10 个为只读 op：允许携带 `requestId`（Client 统一携带），但不受 ledger 约束。
+
+### 2.1 固定文件系统根（破坏性精简）
+
+- bootstrap 为 `{ root: RootDescriptor | null, version, stage, limits, capabilities, degraded }`，严格删除 roots/workspaces 字段与 capabilities.persistentRoots。RootDescriptor 为 `{ id, path, label, identity }`，固定 Host `/`；label 为 `/`，不提供 provider/createdAt 或动态入口元数据。
+- `roots.list`、`roots.status`、`roots.add`、`roots.reauthorize`、`roots.remove` 全部从协议及分派删除，正常 Host 返回 INVALID_REQUEST/400，不保留兼容分支。Client 与 Host 必须一起升级。
+- `createManager({ rootPath = '/' })` 只在初始化时确定根，`getRoot()` 返回副本。rootPath 仅是内部隔离测试构造参数，不是插件 Config、HTTP 输入或用户入口。根 ID 确定性绑定规范路径与 dev:ino，相同身份重启稳定；每次 I/O 仍核验身份、规范路径及 descriptor-relative walk。
+- 不读取/写入旧根授权存储，不迁移或删除旧文件。旧任务根 ID 不自动绑定新根，原任务历史和恢复证明保持；旧 Client 草稿标记不可写但保留。运行中身份变化拒绝访问，重启采用当前 `/`，不再提供重新授权。
+- 引用等绝对路径拼接以根 `/` 为边界，不生成 `//path`。路径文法、版本/确认门禁、鉴权、操作日志及任务恢复验证不因此放宽。
 
 `requestId` 规则：长度 8–128；同一 `requestId` 在同一窗口（TTL 600 s、容量 256）内必须指纹一致，否则 `REQUEST_ID_REUSED`/409；指纹一致的重复请求返回首次结果，不重复执行。缺失 → `INVALID_REQUEST`/400。
 
@@ -132,7 +138,7 @@ transfers.begin | transfers.cancel | transfers.retry
 | 条目类型与编码 | `UNSUPPORTED_ENTRY`、`UNSUPPORTED_ENCODING`、`NOT_DIRECTORY`、`NOT_FOUND`、`LINE_ENDING_MAPPING_LIMIT`、`INCOMPLETE_DOWNLOAD`、`SIZE_MISMATCH` | 404 / 422 / 409 |
 | 任务与历史 | `TASK_NOT_FOUND`、`TASK_BUSY`、`TASK_CHANGED`、`ITEM_NOT_FOUND`、`ITEM_NOT_READY`、`NO_FAILED_ITEMS`、`HISTORY_REVISION_EXHAUSTED` | 404 / 409 |
 | 取消 | `CANCELLED` | 499 |
-| 资源与可用性 | `NO_SPACE`、`IO_ERROR`、`CLEANUP_FAILED`、`SOURCE_DELETE_FAILED`、`PERSISTENCE_FAILED`、`TASK_PERSISTENCE_FAILED`、`INTERRUPTED`、`SERVICE_STOPPED`、`FEATURE_UNAVAILABLE`、`FILE_MANAGER_UNAVAILABLE`（R17 降级拒绝，`details.scope` = `operations` 或 `roots`）、`INITIALIZATION_FAILED` | 500 / 503 / 507 |
+| 资源与可用性 | `NO_SPACE`、`IO_ERROR`、`CLEANUP_FAILED`、`SOURCE_DELETE_FAILED`、`PERSISTENCE_FAILED`、`TASK_PERSISTENCE_FAILED`、`INTERRUPTED`、`SERVICE_STOPPED`、`FEATURE_UNAVAILABLE`、`FILE_MANAGER_UNAVAILABLE`（R17 降级拒绝，`details.scope` = `operations` 或 `filesystem`）、`INITIALIZATION_FAILED` | 500 / 503 / 507 |
 
 `RESOURCE_CLOSED` 表示内部租约已释放（409）。完整清单以 `HOST_ERROR_CODES` 为准，测试会阻止它收缩。
 
@@ -191,7 +197,7 @@ errno 型错误的 `details` 只保留 `committed` / `cleanupFailed` / `stagingN
 
 投影函数（`views.ts`）逐个字段取值并做 schema 自检；缺字段 → `INVALID_STATE`/500（**不静默丢弃**），多字段 → 不会出现（白名单，不是黑名单）。`leaksRecoveryProof(view)` 用于测试断言。
 
-- `toRootDescriptor` → `{ id, provider:'host-local', path, label, identity, createdAt }`
+- `toRootDescriptor` → `{ id, path, label, identity }`；只描述当前单个文件系统根，identity 为 dev:ino，不再携带入口 provider 或添加时间。
 - `toEntrySnapshot`（列举项）→ `{ name, path, kind, size, modifiedAt, version(弱), mode }`；**只允许可寻址条目**，`path` 必须满足 §6.1 的路径文法（否则 schema 直接拒绝，属实现缺陷）
 - `toUnaddressableEntry`（R18 不可寻址项）→ `{ name, kind, reason }`，**结构上没有任何 `path` 字段**（不是原始 path、也不是百分号编码后的 path），因此不可能被前端当作可执行引用；`reason` 是面向操作者的原因说明（1–200 字符）
 - `toEntryStat`（`entries.stat`/新建目录/重命名结果）→ 上述 + `{ rootId, identity }`；文件额外含 `metadataVersion`、`sha256`、`version(强)`
@@ -219,13 +225,13 @@ errno 型错误的 `details` 只保留 `committed` / `cleanupFailed` / `stagingN
 degraded: DegradedView | null     // 必填可空字段：null = 健康
 type DegradedView =
   | { scope: 'operations'; code: string(1..64); message: string(1..300); readOnly: true }
-  | { scope: 'roots';      code: string(1..64); message: string(1..300); readOnly: false }
+  | { scope: 'filesystem'; code: string(1..64); message: string(1..300); readOnly: false }
 ```
 
 - **必填**：`degraded` 缺失不是健康信号，只有 `null` 才是健康。
-- 用判别联合而不是布尔标志：非法组合（`scope:'operations'` + `readOnly:false`、`scope:'roots'` + `readOnly:true`、未知 `scope`）在 schema 层就被拒绝。
-- `scope:'operations'`（根授权可信、操作记录不可用）：`bootstrap` 仍返回**有效根列表**，浏览与 `text.read` 可用；写入、`roots.add/remove`、任务执行、历史写入一律以 **`FILE_MANAGER_UNAVAILABLE`/503** 拒绝并在 `details` 带 `scope:'operations'`；`capabilities.write/tasks/transfers/taskHistory` 为 `false`；**历史不可用不得被呈现为空历史**（`tasks.list` 不得返回 `[]`）。
-- `scope:'roots'`（根授权不可信）：`bootstrap` 返回**空根列表** + 该降级；所有文件操作以 `FILE_MANAGER_UNAVAILABLE`/503 拒绝，`details.scope = 'roots'`。
+- 用判别联合而不是布尔标志：非法组合（`scope:'operations'` + `readOnly:false`、`scope:'filesystem'` + `readOnly:true`、未知 `scope`）在 schema 层就被拒绝。
+- `scope:'operations'`（固定根可用、操作记录不可用）：`bootstrap` 仍返回单个有效 **root**，浏览与 `text.read` 可用；写入、任务执行、历史写入一律以 **`FILE_MANAGER_UNAVAILABLE`/503** 拒绝并在 `details` 带 `scope:'operations'`；`capabilities.write/tasks/transfers/taskHistory` 为 `false`；**历史不可用不得被呈现为空历史**（`tasks.list` 不得返回 `[]`）。
+- `scope:'filesystem'`（固定根初始化失败）：`bootstrap` 返回 **root:null** + 该降级；所有文件操作以 `FILE_MANAGER_UNAVAILABLE`/503 拒绝，`details.scope = 'filesystem'`。
 - 复用既有 `FILE_MANAGER_UNAVAILABLE` 码，不新增错误码；降级是**只读**的：任何损坏或未知状态都必须保留原始记录，不得自动重置、丢弃或改写（R17）。
 
 `entries.list` 结果（`EntriesListResultSchema`）的 R18 语义：
@@ -251,6 +257,14 @@ type DegradedView =
 约定：`canDismiss` 由服务派生、**不持久化**；原始记录（持久化日志）始终保存完整恢复证明，公开 DTO **不得回写**日志。`completion === 'server-stream-finished'` 只表示服务端流结束，不代表浏览器已落盘。
 
 ---
+
+### 5.6 单项重命名兼容授权
+
+`entries.rename` 新增可选 boolean `allowNonExclusiveRename`；缺省/false 保持原子不覆盖，true 也优先尝试原子调用，仅明确不支持才重新核验父目录、原先源版本和目标不存在后允许普通 rename。字符串、数字与 null 拒绝为 `INVALID_REQUEST`。这是对最后检查之后并发同名覆盖风险的单次明确授权，不是覆盖已存在目标或绕过版本校验的授权。
+
+只有 helper 明确返回不支持的 `UNSUPPORTED_ATOMIC_RENAME`/501 业务错误带 `details.compatibilityAvailable: true`；helper 无法启动、权限失败、未知执行结果无该标记。此业务错误详情不改变原始 errno 的公开详情白名单。兼容操作仍保留请求幂等：改变授权字段须使用新 requestId；相同请求重放原回执。成功仍返回 `EntryStat`，已提交后同步/读取错误沿用 committed 语义。
+
+此行为仅用于单项重命名，任务与目录发布继续严格原子不覆盖。界面必须按 [兼容重命名规格 R-003](specs/nfs-compatible-rename.md) 逐次确认，不能自动回退或因其他操作的错误开放兼容入口。
 
 ## 6. HTTP 路由与准入
 
@@ -322,7 +336,7 @@ Client 约定：`ready` 触发一次重同步；溢出时服务端清队列并�
 | 用途 | 命名 |
 | --- | --- |
 | Loader 配置 entry id（kebab-case；不再调用 Settings.register） | `local-file-manager` |
-| 根授权存储单元（snake_case） | `local_file_manager` |
+| 旧根授权存储（已停用；不读取、改写或删除） | `local_file_manager` |
 | 操作日志存储单元 | `local_file_manager_operations` |
 | bundle 单元 id | `local-file-manager` |
 | bootstrap `stage` | `basic-management` |

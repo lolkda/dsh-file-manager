@@ -20,9 +20,15 @@ async function fixture(t, options = {}) {
   const source = path.join(base, 'source');
   const target = path.join(base, 'target');
   await mkdir(source); await mkdir(target);
+  // The Host browses the filesystem root and is never pointed at a directory, so
+  // the fixture addresses its isolated tree the way a user would: relative to
+  // `/`. Every write below therefore still lands inside `base`.
   const manager = createManager(options.managerOptions);
-  const sourceRoot = await manager.addRoot({ path: source });
-  const targetRoot = await manager.addRoot({ path: target });
+  const sourceRoot = manager.getRoot();
+  // One immutable root: the former source and target roots are now sibling
+  // subdirectories inside it.
+  const targetRoot = sourceRoot;
+  const ref = absolute => ({ rootId: sourceRoot.id, path: path.relative('/', absolute) });
   let service;
   const events = new EventEmitter();
   const saved = new Map();
@@ -38,9 +44,9 @@ async function fixture(t, options = {}) {
     },
     onChange(task) { events.emit('change', task); options.onChange?.(task); },
   });
-  async function item(relative, rootId = sourceRoot.id) {
-    const entry = await manager.io.stat({ rootId, path: relative });
-    return { rootId, path: relative, expectedVersion: entry.version };
+  async function item(relative) {
+    const entry = await manager.io.stat(ref(path.join(source, relative)));
+    return { ...ref(path.join(source, relative)), expectedVersion: entry.version };
   }
   async function wait(id) {
     return new Promise((resolve, reject) => {
@@ -50,9 +56,9 @@ async function fixture(t, options = {}) {
     });
   }
   async function start(items, operation = 'copy', rest = {}) {
-    return service.start({ operation, items, destination: { rootId: targetRoot.id, path: '' }, conflict: 'skip', ...rest });
+    return service.start({ operation, items, destination: ref(target), conflict: 'skip', ...rest });
   }
-  return { base, source, target, sourceRoot, targetRoot, manager, service, saved, item, wait, start };
+  return { base, source, target, sourceRoot, targetRoot, manager, ref, service, saved, item, wait, start };
 }
 
 // Removing digest-checked staging would expose partial data and fail this real-FS assertion.
@@ -111,7 +117,7 @@ test('rename conflicts choose an unused suffix rather than silently overwriting'
   await writeFile(path.join(f.target, 'file.txt'), 'target');
   const task = await f.wait((await f.start([await f.item('file.txt')], 'copy', { conflict: 'rename' })).id);
   assert.equal(task.status, 'completed');
-  assert.equal(task.items[0].destination.path, 'file (1).txt');
+  assert.equal(task.items[0].destination.path, f.ref(path.join(f.target, 'file (1).txt')).path);
   assert.equal(await readFile(path.join(f.target, 'file.txt'), 'utf8'), 'target');
   assert.equal(await readFile(path.join(f.target, 'file (1).txt'), 'utf8'), 'source');
 });
@@ -120,7 +126,7 @@ test('overwrite requires the selected destination version and never merges direc
   const f = await fixture(t);
   await writeFile(path.join(f.source, 'file'), 'source');
   await writeFile(path.join(f.target, 'file'), 'target');
-  const stale = (await f.manager.io.stat({ rootId: f.targetRoot.id, path: 'file' })).version;
+  const stale = (await f.manager.io.stat(f.ref(path.join(f.target, 'file')))).version;
   await writeFile(path.join(f.target, 'file'), 'external');
   const task = await f.wait((await f.start([{ ...await f.item('file'), expectedTargetVersion: stale }], 'copy', { conflict: 'overwrite' })).id);
   assert.equal(task.status, 'failed');
@@ -136,7 +142,7 @@ test('an explicit current-version overwrite publishes the source contents', { ti
   const f = await fixture(t);
   await writeFile(path.join(f.source, 'file'), 'source');
   await writeFile(path.join(f.target, 'file'), 'target');
-  const expectedTargetVersion = (await f.manager.io.stat({ rootId: f.targetRoot.id, path: 'file' })).version;
+  const expectedTargetVersion = (await f.manager.io.stat(f.ref(path.join(f.target, 'file')))).version;
   const task = await f.wait((await f.start([{ ...await f.item('file'), expectedTargetVersion }], 'copy', { conflict: 'overwrite' })).id);
   assert.equal(task.status, 'completed');
   assert.equal(await readFile(path.join(f.target, 'file'), 'utf8'), 'source');
@@ -152,11 +158,10 @@ test('a source version conflict creates no destination or owned staging remnants
   assert.deepEqual(await readdir(f.target), []);
 });
 
-test('moving a directory into its own subtree is rejected across overlapping root grants', { timeout: 10000 }, async t => {
+test('moving a directory into its own subtree is rejected', { timeout: 10000 }, async t => {
   const f = await fixture(t);
   await mkdir(path.join(f.source, 'folder/inside'), { recursive: true });
-  const nested = await f.manager.addRoot({ path: path.join(f.source, 'folder/inside') });
-  const task = await f.wait((await f.start([await f.item('folder')], 'move', { destination: { rootId: nested.id, path: '' } })).id);
+  const task = await f.wait((await f.start([await f.item('folder')], 'move', { destination: f.ref(path.join(f.source, 'folder/inside')) })).id);
   assert.equal(task.items[0].error.code, 'SELF_DESCENDANT');
   assert.deepEqual(await readdir(path.join(f.source, 'folder')), ['inside']);
 });
@@ -164,7 +169,7 @@ test('moving a directory into its own subtree is rejected across overlapping roo
 test('retry runs only failed items and accepts an explicit new source version', { timeout: 10000 }, async t => {
   const f = await fixture(t);
   await writeFile(path.join(f.source, 'good'), 'good');
-  const task = await f.wait((await f.start([await f.item('good'), { rootId: f.sourceRoot.id, path: 'missing', expectedVersion: 'missing' }])).id);
+  const task = await f.wait((await f.start([await f.item('good'), { ...f.ref(path.join(f.source, 'missing')), expectedVersion: 'missing' }])).id);
   assert.equal(task.status, 'partial');
   assert.deepEqual(task.items.map(item => item.status), ['completed', 'failed']);
   await writeFile(path.join(f.target, 'good'), 'external target');
@@ -261,7 +266,7 @@ test('failed retry persistence retains the preceding failure receipt and does no
   const f = await fixture(t, { persistTask: task => failRetry && task.status === 'queued'
     ? writeFile(path.join(location, 'missing/state'), 'data') : undefined });
   location = f.base;
-  const before = await f.wait((await f.start([{ rootId: f.sourceRoot.id, path: 'missing', expectedVersion: 'missing' }])).id);
+  const before = await f.wait((await f.start([{ ...f.ref(path.join(f.source, 'missing')), expectedVersion: 'missing' }])).id);
   failRetry = true;
   await assert.rejects(f.service.retry({ taskId: before.id, items: [{ id: before.items[0].id, name: 'new-name' }] }), { code: 'ENOENT' });
   const after = await f.service.get({ taskId: before.id });
@@ -279,7 +284,7 @@ test('concurrent retries cannot enqueue the same failed item twice', { timeout: 
   const f = await fixture(t, { async persistTask(task) {
     if (gateRetry && task.status === 'queued') { gateRetry = false; announce(); await gate; }
   } });
-  const before = await f.wait((await f.start([{ rootId: f.sourceRoot.id, path: 'file', expectedVersion: 'missing' }])).id);
+  const before = await f.wait((await f.start([{ ...f.ref(path.join(f.source, 'file')), expectedVersion: 'missing' }])).id);
   await writeFile(path.join(f.source, 'file'), 'recovered');
   const request = { taskId: before.id, items: [{ id: before.items[0].id, expectedVersion: (await f.item('file')).expectedVersion }] };
   gateRetry = true;
@@ -316,14 +321,23 @@ test('shutdown waits for an accepted task persistence boundary and cancels its n
   assert.deepEqual(await readdir(f.target), []);
 });
 
+/**
+ * A destination on a genuinely different filesystem, reached through the one
+ * fixed root: the former "second grant" is now an absolute path under `/`, so
+ * the real EXDEV behaviour is exercised instead of being simulated.
+ */
 async function crossVolume(t, f) {
-  let target;
-  try { target = await mkdtemp('/dev/shm/dsh-file-manager-exdev-'); }
+  let directory;
+  try { directory = await mkdtemp('/dev/shm/dsh-file-manager-exdev-'); }
   catch (error) { if (['ENOENT', 'EACCES', 'EROFS'].includes(error.code)) { t.skip('A writable second filesystem is unavailable.'); return null; } throw error; }
-  t.after(() => rm(target, { recursive: true, force: true }));
-  if ((await stat(target)).dev === (await stat(f.source)).dev) { t.skip('The available directories are on the same filesystem.'); return null; }
-  const root = await f.manager.addRoot({ path: target });
-  return { target, root };
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  if ((await stat(directory)).dev === (await stat(f.source)).dev) { t.skip('The available directories are on the same filesystem.'); return null; }
+  return {
+    target: directory,
+    /** The absolute path of a volume-relative location. */
+    at: value => path.join(directory, value),
+    ref: value => f.ref(value ? path.join(directory, value) : directory),
+  };
 }
 
 for (const corruption of ['empty', 'wrong-target']) {
@@ -337,7 +351,7 @@ for (const corruption of ['empty', 'wrong-target']) {
     const volume = await crossVolume(t, f);
     if (!volume) return;
     await writeFile(path.join(source, 'file'), 'original');
-    const failed = await f.wait((await f.start([await f.item('file')], 'move', { destination: { rootId: volume.root.id, path: '' } })).id);
+    const failed = await f.wait((await f.start([await f.item('file')], 'move', { destination: volume.ref('') })).id);
     await chmod(source, 0o700);
     assert.equal(failed.items[0].error.code, 'SOURCE_DELETE_FAILED');
     const record = structuredClone(f.saved.get(failed.id));
@@ -346,7 +360,7 @@ for (const corruption of ['empty', 'wrong-target']) {
     else {
       await mkdir(path.join(volume.target, 'file'));
       await writeFile(path.join(volume.target, 'file/other'), 'original');
-      record.items[0].checkpoint.targetManifest = [await f.manager.io.stat({ rootId: volume.root.id, path: 'file/other' })];
+      record.items[0].checkpoint.targetManifest = [await f.manager.io.stat(volume.ref('file/other'))];
     }
     let finish;
     const done = new Promise(resolve => { finish = resolve; });
@@ -377,7 +391,7 @@ for (const mode of ['live', 'retry', 'restore']) {
         // A real journal failure pauses this move before cleanup, leaving a durable publication proof.
         await writeFile(path.join(base, 'missing-journal/task.json'), JSON.stringify(task));
       }
-      if (!attacked && checkpoint?.removed?.includes('tree/b')) {
+      if (!attacked && checkpoint?.removed?.some(entry => entry.endsWith('tree/b'))) {
         attacked = true;
         await rm(path.join(target, 'tree/a'));
       }
@@ -390,7 +404,7 @@ for (const mode of ['live', 'retry', 'restore']) {
     await mkdir(path.join(f.source, 'tree'));
     await writeFile(path.join(f.source, 'tree/a'), 'AAA');
     await writeFile(path.join(f.source, 'tree/b'), 'BBB');
-    let done = await f.wait((await f.start([await f.item('tree')], 'move', { destination: { rootId: volume.root.id, path: '' } })).id);
+    let done = await f.wait((await f.start([await f.item('tree')], 'move', { destination: volume.ref('') })).id);
     if (mode !== 'live') {
       assert.equal(done.status, 'failed');
       assert.deepEqual(f.saved.get(done.id).items[0].checkpoint.removed, []);
@@ -414,7 +428,7 @@ for (const mode of ['live', 'retry', 'restore']) {
     assert.equal(surviving, 'AAA', 'the only remaining AAA bytes must not be deleted after their target disappeared');
     assert.equal(done.status, 'failed');
     assert.equal(done.items[0].error.code, 'SOURCE_DELETE_FAILED');
-    assert.deepEqual(done.items[0].error.details.removedPaths, ['tree/b']);
+    assert.deepEqual(done.items[0].error.details.removedPaths, [`${f.ref(path.join(f.source, 'tree')).path}/b`]);
     assert.equal(done.items[0].error.details.committed, true);
     assert.equal(done.items[0].result.sourceRemoved, false);
     assert.equal(await absent(path.join(f.source, 'tree/b')), true);
@@ -426,38 +440,37 @@ for (const mode of ['live', 'retry', 'restore']) {
 for (const mutation of ['content-changed', 'container-replaced', 'ancestor-replaced']) {
   test(`EXDEV cleanup rechecks ${mutation} proof at each source removal`, { timeout: 10000 }, async t => {
     let target;
-    let targetRootId;
+    let volume;
     let attacked = false;
     let originalFileVersion;
     let currentFileVersion;
     let originalParentIdentity;
     let currentParentIdentity;
     const f = await fixture(t, { async persistTask(task) {
-      if (attacked || !task.items[0].checkpoint?.removed?.includes('tree/z')) return;
+      if (attacked || !task.items[0].checkpoint?.removed?.some(entry => entry.endsWith('tree/z'))) return;
       attacked = true;
-      const fileRef = { rootId: targetRootId, path: 'holder/tree/branch/leaf/a' };
+      const fileRef = volume.ref('holder/tree/branch/leaf/a');
       originalFileVersion = (await f.manager.io.stat(fileRef)).version;
-      if (mutation === 'content-changed') await writeFile(path.join(target, fileRef.path), 'XXX');
+      if (mutation === 'content-changed') await writeFile(volume.at('holder/tree/branch/leaf/a'), 'XXX');
       else {
         const parentPath = mutation === 'container-replaced' ? 'holder' : 'holder/tree/branch';
         const childName = mutation === 'container-replaced' ? 'tree' : 'leaf';
-        originalParentIdentity = (await f.manager.io.stat({ rootId: targetRootId, path: parentPath })).identity;
+        originalParentIdentity = (await f.manager.io.stat(volume.ref(parentPath))).identity;
         await rename(path.join(target, parentPath), path.join(target, `${parentPath}-old`));
         await mkdir(path.join(target, parentPath));
         await rename(path.join(target, `${parentPath}-old`, childName), path.join(target, parentPath, childName));
-        currentParentIdentity = (await f.manager.io.stat({ rootId: targetRootId, path: parentPath })).identity;
+        currentParentIdentity = (await f.manager.io.stat(volume.ref(parentPath))).identity;
       }
       currentFileVersion = (await f.manager.io.stat(fileRef)).version;
     } });
-    const volume = await crossVolume(t, f);
+    volume = await crossVolume(t, f);
     if (!volume) return;
     target = volume.target;
-    targetRootId = volume.root.id;
     await mkdir(path.join(target, 'holder'));
     await mkdir(path.join(f.source, 'tree/branch/leaf'), { recursive: true });
     await writeFile(path.join(f.source, 'tree/branch/leaf/a'), 'AAA');
     await writeFile(path.join(f.source, 'tree/z'), 'ZZZ');
-    const done = await f.wait((await f.start([await f.item('tree')], 'move', { destination: { rootId: targetRootId, path: 'holder' } })).id);
+    const done = await f.wait((await f.start([await f.item('tree')], 'move', { destination: volume.ref('holder') })).id);
     assert.equal(attacked, true);
     if (mutation !== 'content-changed') {
       assert.equal(currentFileVersion, originalFileVersion, 'moving ancestor directories leaves the leaf strong version unchanged');
@@ -466,7 +479,7 @@ for (const mutation of ['content-changed', 'container-replaced', 'ancestor-repla
     const surviving = await readFile(path.join(f.source, 'tree/branch/leaf/a'), 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
     assert.equal(surviving, 'AAA', 'a changed target proof must stop deletion of its still-existing source');
     assert.equal(done.items[0].error.code, 'SOURCE_DELETE_FAILED');
-    assert.deepEqual(done.items[0].error.details.removedPaths, ['tree/z']);
+    assert.deepEqual(done.items[0].error.details.removedPaths, [`${f.ref(path.join(f.source, 'tree')).path}/z`]);
     assert.equal(done.items[0].result.sourceRemoved, false);
     assert.equal(await absent(path.join(f.source, 'tree/z')), true);
     assert.equal(await readFile(path.join(target, 'holder/tree/z'), 'utf8'), 'ZZZ');
@@ -480,7 +493,7 @@ test('real EXDEV moves verify and publish the complete copy before removing sour
   if (!volume) return;
   await mkdir(path.join(f.source, 'folder/empty'), { recursive: true });
   await writeFile(path.join(f.source, 'folder/file'), 'content');
-  const task = await f.wait((await f.start([await f.item('folder')], 'move', { destination: { rootId: volume.root.id, path: '' } })).id);
+  const task = await f.wait((await f.start([await f.item('folder')], 'move', { destination: volume.ref('') })).id);
   assert.equal(task.status, 'completed');
   assert.equal(task.items[0].result.method, 'copy-delete');
   assert.equal(task.items[0].result.sourceRemoved, true);
@@ -502,17 +515,17 @@ test('a failed EXDEV source cleanup can be retried without recopying its committ
   const volume = await crossVolume(t, f);
   if (!volume) return;
   await writeFile(path.join(f.source, 'file'), 'original');
-  const task = await f.wait((await f.start([await f.item('file')], 'move', { destination: { rootId: volume.root.id, path: '' } })).id);
+  const task = await f.wait((await f.start([await f.item('file')], 'move', { destination: volume.ref('') })).id);
   await chmod(source, 0o700);
   assert.equal(task.items[0].error.code, 'SOURCE_DELETE_FAILED');
   assert.equal(task.items[0].error.details.bothCopiesExist, true);
-  const published = await f.manager.io.stat({ rootId: volume.root.id, path: 'file' });
+  const published = await f.manager.io.stat(volume.ref('file'));
   const retried = await f.wait((await f.service.retry({ taskId: task.id })).id);
   assert.equal(retried.status, 'completed');
   assert.equal(retried.items[0].attempts, 2);
   assert.equal(retried.items[0].result.sourceRemoved, true);
   assert.equal(await absent(path.join(source, 'file')), true);
-  assert.equal((await f.manager.io.stat({ rootId: volume.root.id, path: 'file' })).version, published.version);
+  assert.equal((await f.manager.io.stat(volume.ref('file'))).version, published.version);
 });
 
 test('cancellation after EXDEV publication preserves the source and reports the committed target', { timeout: 10000 }, async t => {
@@ -527,7 +540,7 @@ test('cancellation after EXDEV publication preserves the source and reports the 
   const volume = await crossVolume(t, f);
   if (!volume) return;
   await writeFile(path.join(f.source, 'file'), 'original');
-  const task = await f.start([await f.item('file')], 'move', { destination: { rootId: volume.root.id, path: '' } });
+  const task = await f.start([await f.item('file')], 'move', { destination: volume.ref('') });
   await published;
   const cancelling = f.service.cancel({ taskId: task.id });
   release(); await cancelling;
@@ -554,7 +567,7 @@ test('EXDEV cleanup detects source changes after publication and retry never ove
   const volume = await crossVolume(t, f);
   if (!volume) return;
   await writeFile(path.join(f.source, 'file'), 'original');
-  const task = await f.wait((await f.start([await f.item('file')], 'move', { destination: { rootId: volume.root.id, path: '' } })).id);
+  const task = await f.wait((await f.start([await f.item('file')], 'move', { destination: volume.ref('') })).id);
   assert.equal(task.status, 'failed');
   assert.equal(task.items[0].error.code, 'SOURCE_DELETE_FAILED');
   assert.equal(task.items[0].error.details.committed, true);
@@ -584,7 +597,7 @@ test('a manifest inside the verification budget copies and stays content-bound t
   assert.equal(task.status, 'completed', JSON.stringify(task.items.map(item => item.error ?? item.status)));
   const digest = createHash('sha256').update(payload).digest('hex');
   assert.equal(createHash('sha256').update(await readFile(path.join(f.target, 'big.bin'))).digest('hex'), digest, 'the published bytes must be the source bytes');
-  const published = await f.manager.io.stat({ rootId: f.targetRoot.id, path: 'big.bin' });
+  const published = await f.manager.io.stat(f.ref(path.join(f.target, 'big.bin')));
   assert.ok(published.version.endsWith(`:${digest}`), 'the published entry must carry the verified content digest');
 });
 
@@ -603,4 +616,56 @@ test('a manifest above the verification budget is refused before the content is 
   assert.ok(task.items.every(item => item.error?.code === 'TOO_LARGE'), JSON.stringify(task.items.map(item => item.error?.code ?? item.status)));
   assert.deepEqual(await readdir(f.target), [], 'a refused operation must not publish anything');
   assert.ok(read < each, `planning must not read the content: expected far less than ${each * names.length} bytes, saw ${read}`);
+});
+
+test('a retried task that names a root from a previous process fails at execution and is never re-bound', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.source, 'file'), 'content');
+  const done = await f.wait((await f.start([await f.item('file')])).id);
+  assert.equal(done.status, 'completed');
+  // A durable record from a process that knew a different root: the id can no
+  // longer be resolved, and nothing may re-point it at the root this process
+  // happens to browse now.
+  const staleId = 'root-from-a-previous-process';
+  const record = structuredClone(f.saved.get(done.id));
+  record.status = 'failed';
+  record.items[0] = {
+    ...record.items[0], status: 'failed',
+    error: { code: 'RECOVERY_REQUIRED', message: 'Retry the item.' },
+    source: { ...record.items[0].source, rootId: staleId },
+  };
+  delete record.items[0].result;
+  delete record.items[0].checkpoint;
+  const attemptsBefore = record.items[0].attempts;
+  const targetBefore = await readdir(f.target);
+  const persisted = new Map();
+  let finish;
+  const settled = new Promise(resolve => { finish = resolve; });
+  const restored = tasksModule.createTaskService({
+    manager: f.manager,
+    initialTasks: [record],
+    persistTask(task) { persisted.set(task.id, structuredClone(task)); },
+    onChange(task) { if (terminal(task) && task.items[0].attempts > attemptsBefore) finish(task); },
+  });
+  t.after(() => restored.close());
+
+  // A new selection that names the stale root is refused before it is recorded.
+  await assert.rejects(f.service.start({
+    operation: 'copy', conflict: 'skip',
+    items: [{ rootId: staleId, path: record.items[0].source.path, expectedVersion: record.items[0].source.expectedVersion }],
+    destination: f.ref(f.target),
+  }), { code: 'ROOT_NOT_FOUND', status: 404 }, 'a stale root id must not start a task');
+  const listed = await restored.list();
+  assert.equal(listed.filter(task => task.id === record.id).length, 1, 'a refused start adds no record');
+
+  // Retrying the recorded selection is accepted, then fails per item at execution.
+  const accepted = await restored.retry({ taskId: record.id });
+  assert.ok(accepted, 'a retry must resolve; the failure belongs to the item, not the request');
+  const failed = await settled;
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.items[0].status, 'failed');
+  assert.equal(failed.items[0].error.code, 'ROOT_NOT_FOUND');
+  assert.equal(failed.items[0].source.rootId, staleId, 'the recorded source keeps the id it was created with');
+  assert.deepEqual(await readdir(f.target), targetBefore, 'a refused item publishes nothing');
+  assert.equal(persisted.get(record.id).items[0].source.rootId, staleId, 'the durable record is never re-bound to the current root');
 });

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getSystemErrorName } from 'node:util';
-import { FileManagerError, fail } from '../contracts/errors.js';
+import { FileManagerError, fail, isFileManagerError } from '../contracts/errors.js';
 
 /**
  * The helper ships at the package root, outside `dist/`, so this specifier
@@ -53,11 +53,32 @@ export function renameNoReplace(
         if (name === 'EEXIST' || name === 'ENOTEMPTY') {
           reject(new FileManagerError('ALREADY_EXISTS', 'The destination appeared before atomic publication.', 409));
         } else if (['ENOSYS', 'EOPNOTSUPP', 'ENOTSUP', 'EINVAL'].includes(name)) {
-          reject(new FileManagerError('UNSUPPORTED_ATOMIC_RENAME', 'This filesystem cannot guarantee atomic no-replace rename.', 501));
+          // Only this branch proves that the filesystem itself cannot enforce
+          // no-replace. It is therefore the only failure allowed to tell a caller
+          // that an explicitly confirmed ordinary rename is even worth offering;
+          // every other outcome reports itself without that marker.
+          reject(new FileManagerError('UNSUPPORTED_ATOMIC_RENAME', 'This filesystem cannot guarantee atomic no-replace rename.', 501, { compatibilityAvailable: true }));
         } else reject(Object.assign(new Error('Atomic rename failed.'), { code: name }));
         return;
       }
       reject(new FileManagerError('ATOMIC_RENAME_UNCERTAIN', 'The rename outcome could not be confirmed. Inspect the source and destination before retrying.', 500, { outcome: 'unknown', helperExitCode: code, signal }));
     });
   });
+}
+
+/**
+ * True only when the helper proved that this filesystem cannot enforce
+ * no-replace, so the caller may offer its explicitly confirmed compatibility
+ * fallback. A helper that could not be started, a signal, a permission failure,
+ * a raw errno, or an outcome that was never observed proves nothing about the
+ * filesystem and therefore never authorizes that fallback.
+ *
+ * This helper reports the single failure; it never performs a fallback itself,
+ * because the confirmed downgrade belongs to one single-entry rename and must not
+ * be inherited by tasks, uploads or directory publication.
+ */
+export function renameCompatibilityAvailable(error: unknown): boolean {
+  return isFileManagerError(error)
+    && error.code === 'UNSUPPORTED_ATOMIC_RENAME'
+    && error.details.compatibilityAvailable === true;
 }

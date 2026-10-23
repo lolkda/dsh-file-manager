@@ -24,6 +24,14 @@ const h = React.createElement;
 // lives here because the browser module table — not the bundle — supplies the
 // primitives, so the same boundary must serve every suite.
 export const uiBoundary = {
+  writeClipboard: async text => {
+    if (!globalThis.window?.navigator?.clipboard?.writeText) return false;
+    await globalThis.window.navigator.clipboard.writeText(text);
+    return true;
+  },
+  IconCloseOutlineRegular(props) {
+    return h('svg', { ...props, 'aria-hidden': 'true', 'data-host-icon': 'IconCloseOutlineRegular' });
+  },
   Button({ variant, size, icon, children, ...nativeAttrs }) {
     return h('button', nativeAttrs, icon, children);
   },

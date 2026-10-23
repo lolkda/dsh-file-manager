@@ -1,7 +1,7 @@
 {
   "name": "@lolkda/dsh-file-manager",
   "version": "0.6.0",
-  "description": "Independent DSH file manager with explicit Host-local root grants",
+  "description": "Independent DSH file manager rooted at the Host filesystem",
   "keywords": [
     "dsh",
     "deepseek-harness",

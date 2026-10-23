@@ -231,7 +231,7 @@ export function createIO<Root>(dependencies: IODependencies<Root>) {
       async verify() {
         available();
         if (closed) fail('RESOURCE_CLOSED', 'The directory lease is closed.', 409);
-        if (rootOf(ref.rootId) !== root) fail('ROOT_CHANGED', 'The root grant changed.', 409);
+        if (rootOf(ref.rootId) !== root) fail('ROOT_CHANGED', 'The root this directory lease was built for is no longer the current root.', 409);
         const current = await openDirectory(root, parts);
         try {
           if (identity(await current.stat({ bigint: true })) !== identity(opened)) fail('PATH_CHANGED', 'The directory path changed while in use.', 409);
@@ -277,7 +277,7 @@ export function createIO<Root>(dependencies: IODependencies<Root>) {
 
   async function acquireParent(ref: RootPathRef = {}) {
     const parts = partsOf(ref.path ?? '');
-    if (!parts.length) fail('ROOT_OPERATION_NOT_ALLOWED', 'The granted root itself cannot be modified.', 403);
+    if (!parts.length) fail('ROOT_OPERATION_NOT_ALLOWED', 'The root itself cannot be modified.', 403);
     const parent = await acquireDirectory({ rootId: ref.rootId, path: parts.slice(0, -1).join('/') });
     return { parent, name: parts.at(-1) as string, address: fdPath(parent.handle, parts.at(-1)), ref: { rootId: String(ref.rootId), path: ref.path ?? '' } };
   }

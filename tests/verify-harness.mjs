@@ -143,13 +143,16 @@ export async function hostFixture({
   const { resolveLimits } = await import('../dist/contracts/limits.js');
   const effective = resolveLimits(limits);
   const fixture = await tempRoot(prefix);
+  // The manager's root is fixed at construction; the temporary directory is the
+  // only browsing boundary this Host process ever opens.
   const manager = createManager({
+    rootPath: fixture.directory,
     maxTextBytes: effective.maxTextBytes,
     deletePlanTtlMs: effective.deletePlanTtlMs,
     maxVerificationBytes: effective.maxVerificationBytes,
     ...(scheduler ? { scheduler } : {}),
   });
-  const grant = await manager.addRoot({ path: fixture.directory });
+  const grant = manager.getRoot();
   const settled = new Map();
   const watchers = new Set();
   const announce = task => {
@@ -172,7 +175,6 @@ export async function hostFixture({
   }
   const router = createFileManagerRouter({
     manager,
-    workspaces: () => [],
     limits: effective,
     ...(degraded ? { degraded } : {}),
     ...(readOnly ? { readOnly } : {}),
@@ -245,13 +247,14 @@ export function writeSizedFile(file, bytes) {
 }
 
 /**
- * A storage-domain stub for the R17 degradation cases. The real profile storage
- * is never touched: every case builds its own in-memory records and can be told
- * to fail on open, which is what "operation records unavailable" means.
+ * A storage-domain stub for the R17 degradation cases. The real operation
+ * journal is never touched: every case builds its own in-memory records and can
+ * be told to fail on open, which is what "operation records unavailable" means.
+ * There is no root grant store to model: the browsing root is fixed in memory.
  */
 export function storageStub({ failOn = undefined, global = undefined, tables = {} } = {}) {
   const state = {
-    global: structuredClone(global ?? { revision: 0, roots: [] }),
+    global: structuredClone(global ?? {}),
     tables: new Map(Object.entries(tables).map(([name, records]) => [name, new Map(Object.entries(records))])),
     opens: 0,
     writes: [],
@@ -274,7 +277,7 @@ export function storageStub({ failOn = undefined, global = undefined, tables = {
       return {
         global: {
           get: () => state.global,
-          async set(next) { state.global = next; state.writes.push(['global', 'roots', structuredClone(next)]); },
+          async set(next) { state.global = next; state.writes.push(['global', 'values', structuredClone(next)]); },
         },
         table,
         async close() {},

@@ -10,7 +10,8 @@ import {
 } from '../contracts/protocol.js';
 import {
   toActivityDismissedReceipt, toActivityRejectedReceipt, toDeleteCommitResult, toDeletePlan, toEntrySnapshot,
-  toEntryStat, toPublicError, toPublicTransfer, toRootDescriptor, toTextReceipt, toTextSnapshot,
+  toEntryStat, toPublicError, toPublicTransfer, toRootDescriptor,
+  toTextReceipt, toTextSnapshot,
   type DegradedView,
 } from '../contracts/views.js';
 import type { EntryView, UnaddressableEntry } from './io.js';
@@ -20,7 +21,6 @@ import { createRequestLedger } from './requests.js';
 import type { TaskService } from './tasks.js';
 import type { TransferService } from './transfers.js';
 import type { EventHub, WatchEvent, WatchService, WatchTarget } from './watch.js';
-import type { WorkspaceCandidateView } from './context.js';
 
 const BODY_BYTES = Symbol('control-body-bytes');
 type BodyInput = Record<string, unknown> & { [BODY_BYTES]?: number };
@@ -74,9 +74,7 @@ async function readJson(request: Request, limit: number, operationRequired = tru
 
 export interface ControlHandlerOptions {
   manager: Manager;
-  workspaces: () => WorkspaceCandidateView[];
   ledger?: RequestLedger | undefined;
-  persistentRoots?: boolean | undefined;
   /** Defaults to the effective profile limits; callers normally pass the resolved ones. */
   limits?: ProfileLimits | undefined;
   tasks?: TaskService | undefined;
@@ -93,14 +91,17 @@ export interface ControlHandlerOptions {
 
 /** Operations that change durable state and are refused while degraded. */
 const WRITE_OPS = new Set([
-  'roots.add', 'roots.remove', 'entries.create-file', 'entries.create-directory', 'entries.rename',
+  'entries.create-file', 'entries.create-directory', 'entries.rename',
   'delete.prepare', 'delete.commit', 'activities.dismiss',
 ]);
+
+/** Refusal shared by every route while the fixed root is not browsable. */
+const FILESYSTEM_UNAVAILABLE = 'The fixed root could not be opened; the file manager is unavailable.';
 
 /** Adapt the domain to Connection-authenticated, Session-independent control. */
 export function createControlHandler(options: ControlHandlerOptions): (request: Request) => Promise<Response> {
   const {
-    manager, workspaces, ledger = createRequestLedger(), persistentRoots = false,
+    manager, ledger = createRequestLedger(),
     limits = resolveLimits(), tasks, transfers, watcher, version = VERSION,
     envelope = 'control', degraded = null, readOnly = false,
   } = options;
@@ -109,10 +110,10 @@ export function createControlHandler(options: ControlHandlerOptions): (request: 
     try {
         const limit = envelope === 'manifest' ? MANIFEST_ENVELOPE_BYTES : CONTROL_ENVELOPE_BYTES;
       const input = await readJson(request, limit);
-      if (degradedScope === 'roots' && input.op !== 'bootstrap') {
-        // Browsing is impossible without trustworthy grants, but the client must
+      if (degradedScope === 'filesystem' && input.op !== 'bootstrap') {
+        // Browsing is impossible without a verified root, but the client must
         // still be able to ask why: only bootstrap answers.
-        fail('FILE_MANAGER_UNAVAILABLE', 'The stored root grants are unusable; the file manager is unavailable.', 503, { scope: 'roots' });
+        fail('FILE_MANAGER_UNAVAILABLE', FILESYSTEM_UNAVAILABLE, 503, { scope: 'filesystem' });
       }
       if (envelope === 'manifest' && !manifestRouteAccepts(input.op)) {
         fail('INVALID_REQUEST', 'The manifest route accepts only tasks.start, tasks.retry and transfers.begin.', 400);
@@ -130,15 +131,17 @@ export function createControlHandler(options: ControlHandlerOptions): (request: 
       let value: unknown;
       switch (operation) {
         case 'bootstrap':
+          // A manager only exists when its root was opened and identity-checked
+          // at construction, so there is always a descriptor to report. It is
+          // withheld anyway while the surface is degraded on the filesystem, so a
+          // client is not handed a location it cannot read.
           value = {
-            roots: degradedScope === 'roots' ? [] : manager.listRoots().map(toRootDescriptor),
-            workspaces: workspaces(),
+            root: degradedScope === 'filesystem' ? null : toRootDescriptor(manager.getRoot()),
             version,
             stage: WIRE_STAGE,
             limits,
             capabilities: {
               write: !readOnly && degradedScope === undefined,
-              persistentRoots: degradedScope === undefined ? persistentRoots : false,
               tasks: Boolean(tasks) && !readOnly && degradedScope === undefined,
               transfers: Boolean(transfers) && !readOnly && degradedScope === undefined,
               watch: Boolean(watcher) && degradedScope === undefined,
@@ -148,9 +151,6 @@ export function createControlHandler(options: ControlHandlerOptions): (request: 
             degraded,
           };
           break;
-        case 'roots.list': value = manager.listRoots().map(toRootDescriptor); break;
-        case 'roots.add': value = await mutation(async () => toRootDescriptor(await manager.addRoot({ path: input.path }))); break;
-        case 'roots.remove': value = await mutation(() => manager.removeRoot({ rootId: input.rootId })); break;
         case 'entries.list': {
           const listing = await manager.list({ ...ref, path: (input.path as string | undefined) ?? '', limit: (input.limit as number | undefined) ?? undefined, cursor: input.cursor as string | undefined });
           value = {
@@ -168,7 +168,7 @@ export function createControlHandler(options: ControlHandlerOptions): (request: 
         case 'text.read': value = toTextSnapshot(await manager.readText({ ...ref, signal: request.signal })); break;
         case 'entries.create-file': value = await mutation(async () => toTextReceipt(await manager.createFile({ ...ref, signal: request.signal }))); break;
         case 'entries.create-directory': value = await mutation(async () => toEntryStat(await manager.createDirectory(ref))); break;
-        case 'entries.rename': value = await mutation(async () => toEntryStat(await manager.rename({ ...ref, name: input.name, expectedVersion: input.expectedVersion }))); break;
+        case 'entries.rename': value = await mutation(async () => toEntryStat(await manager.rename({ ...ref, name: input.name, expectedVersion: input.expectedVersion, allowNonExclusiveRename: input.allowNonExclusiveRename }))); break;
         case 'delete.prepare': value = toDeletePlan(await manager.prepareDelete({ items: input.items, signal: request.signal })); break;
         case 'delete.commit': value = await mutation(async () => toDeleteCommitResult(await manager.commitDelete({ planId: input.planId, confirmed: input.confirmed }))); break;
         case 'activities.dismiss': value = await mutation(() => dismissActivities({ input, tasks, transfers })); break;
@@ -210,14 +210,20 @@ export function createControlHandler(options: ControlHandlerOptions): (request: 
   };
 }
 
+/** The absolute form of a root-relative path; a `/` root does not yield `//`. */
+function absolutePathIn(rootPath: string, relativePath: string): string {
+  if (!relativePath) return rootPath;
+  return `${rootPath.replace(/\/+$/, '')}/${relativePath}`;
+}
+
 /** Build a `@path` mention without ever minting one the grammar cannot express. */
 async function reference(manager: Manager, input: BodyInput): Promise<unknown> {
   const ref: { rootId: unknown; path: string | undefined } = { rootId: input.rootId, path: input.path as string | undefined };
+  // The stat resolves the root id first, so a reference to any other root is
+  // already `ROOT_NOT_FOUND` before an absolute path is built from it.
   const entry = await manager.io.stat({ ...ref, metadataOnly: true });
   if (!['file', 'directory'].includes(entry.kind)) fail('UNSUPPORTED_ENTRY', 'Only regular files and directories can be referenced.', 422);
-  const root = manager.listRoots().find(candidate => candidate.id === ref.rootId);
-  if (!root) fail('ROOT_NOT_FOUND', 'The root grant was removed.', 404);
-  const absolutePath = `${root.path}${entry.path ? `/${entry.path}` : ''}`;
+  const absolutePath = absolutePathIn(manager.getRoot().path, entry.path);
   const mentionPath = entry.kind === 'directory' ? `${absolutePath.replace(/\/+$/, '')}/` : absolutePath;
   if (/[\u0000-\u001f\u007f-\u009f"]/u.test(mentionPath)) fail('UNREPRESENTABLE_REFERENCE', 'This path cannot be represented safely by the current reference grammar.', 422);
   const mention = /\s/u.test(mentionPath) ? `@"${mentionPath}"` : `@${mentionPath}`;
@@ -269,7 +275,7 @@ export function createTextHandler(options: TextHandlerOptions): (request: Reques
     try {
       // JSON escapes can require six wire bytes for one text byte.
       const input = await readJson(request, textEnvelopeBytes(maxTextBytes));
-      if (degraded?.scope === 'roots') fail('FILE_MANAGER_UNAVAILABLE', 'The stored root grants are unusable; the file manager is unavailable.', 503, { scope: 'roots' });
+      if (degraded?.scope === 'filesystem') fail('FILE_MANAGER_UNAVAILABLE', FILESYSTEM_UNAVAILABLE, 503, { scope: 'filesystem' });
       if (readOnly) fail('FILE_MANAGER_UNAVAILABLE', 'The operation journal is unavailable; the file manager is read-only.', 503, { scope: 'operations' });
       const parsed = parseTextRequest(input);
       if (parsed.op !== 'save') fail('INVALID_REQUEST', 'The text mutation operation must be save.');
@@ -434,9 +440,9 @@ export function createFileManagerRouter(options: FileManagerRouterOptions): (req
       await request.body?.cancel().catch(() => {});
       return errorResult(new FileManagerError('INVALID_REQUEST', 'This file-manager endpoint does not exist.', 404));
     }
-    if (options.degraded?.scope === 'roots' && route !== 'control') {
+    if (options.degraded?.scope === 'filesystem' && route !== 'control') {
       await request.body?.cancel().catch(() => {});
-      return errorResult(new FileManagerError('FILE_MANAGER_UNAVAILABLE', 'The stored root grants are unusable; the file manager is unavailable.', 503, { scope: 'roots' }));
+      return errorResult(new FileManagerError('FILE_MANAGER_UNAVAILABLE', FILESYSTEM_UNAVAILABLE, 503, { scope: 'filesystem' }));
     }
     let release: () => void;
     try { release = admit(route); }
@@ -451,26 +457,26 @@ export function createFileManagerRouter(options: FileManagerRouterOptions): (req
 }
 
 /**
- * A route handler for a file manager whose durable state could not open. It
+ * A route handler for a file manager whose fixed root could not be opened. It
  * still answers `bootstrap` with the degradation reason, because a client that
- * only sees a 503 cannot tell "untrusted grants" from "Host is down".
+ * only sees a 503 cannot tell "no browsable root" from "Host is down".
  */
 export function createUnavailableHandler(degraded: DegradedView, options: {
-  workspaces: () => WorkspaceCandidateView[];
   /** Only the control route may answer `bootstrap`; every other route refuses. */
   route?: RouteId | undefined;
   version?: string | undefined;
   limits?: ProfileLimits | undefined;
-  persistentRoots?: boolean | undefined;
-}): (request: Request) => Promise<Response> {
-  const { workspaces, route = 'control', version = VERSION, limits = resolveLimits() } = options;
+} = {}): (request: Request) => Promise<Response> {
+  const { route = 'control', version = VERSION, limits = resolveLimits() } = options;
   return async (request: Request): Promise<Response> => {
     try {
       const input = await readJson(request, CONTROL_ENVELOPE_BYTES, false);
-      if (degraded.scope === 'roots' && route === 'control' && input.op === 'bootstrap') {
+      if (degraded.scope === 'filesystem' && route === 'control' && input.op === 'bootstrap') {
         return json({ ok: true, value: {
-          roots: [], workspaces: workspaces(), version, stage: WIRE_STAGE, limits,
-          capabilities: { write: false, persistentRoots: false, tasks: false, transfers: false, watch: false, references: false, taskHistory: false },
+          // There is no root to report: the client is not handed a location it
+          // cannot read.
+          root: null, version, stage: WIRE_STAGE, limits,
+          capabilities: { write: false, tasks: false, transfers: false, watch: false, references: false, taskHistory: false },
           degraded,
         } });
       }

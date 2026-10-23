@@ -12,8 +12,8 @@ async function integrated(t) {
   const { createTransferService } = await import('../dist/host/transfers.js');
   const { createWatchService } = await import('../dist/host/watch.js');
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-integration-'));
-  const manager = createManager();
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
   const limits = { maxTextBytes: 5 * 1024 ** 2, maxFileBytes: 2 * 1024 ** 3, maxTaskBytes: 10 * 1024 ** 3, maxTaskEntries: 10000, transferConcurrency: 2 };
   let settled;
   const completed = new Promise(resolve => { settled = resolve; });
@@ -21,8 +21,8 @@ async function integrated(t) {
   const transfers = createTransferService({ manager, limits });
   const watcher = createWatchService({ manager });
   t.after(async () => { await watcher.close(); await transfers.close(); await tasks.close(); await manager.close(); await rm(root, { recursive: true, force: true }); });
-  const control = plugin.createControlHandler({ manager, tasks, transfers, watcher, limits, workspaces: () => [] });
-  const manifest = plugin.createControlHandler({ manager, tasks, transfers, watcher, limits, workspaces: () => [], envelope: 'manifest' });
+  const control = plugin.createControlHandler({ manager, tasks, transfers, watcher, limits });
+  const manifest = plugin.createControlHandler({ manager, tasks, transfers, watcher, limits, envelope: 'manifest' });
   const ref = relative => ({ rootId: grant.id, path: relative });
   // Bulk manifests travel on the manifest route; everything else uses the small control envelope.
   const call = payload => ['tasks.start', 'tasks.retry', 'transfers.begin'].includes(payload.op)
@@ -38,9 +38,9 @@ async function fixture(t) {
   assert.equal(typeof plugin.createTextHandler, 'function', 'the versioned text route is missing');
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-write-api-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const manager = createManager();
-  const grant = await manager.addRoot({ path: root });
-  const control = plugin.createControlHandler({ manager, workspaces: () => [] });
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
+  const control = plugin.createControlHandler({ manager });
   const text = plugin.createTextHandler({ manager });
   const ref = relative => ({ rootId: grant.id, path: relative });
   const call = payload => control(request({ requestId: randomUUID(), ...payload }));
@@ -123,7 +123,6 @@ test('an I/O failure after publication reports that the filesystem already chang
       await manager.createDirectory(target);
       throw Object.assign(new Error('simulated directory sync failure'), { code: 'EIO', details: { committed: true } });
     } },
-    workspaces: () => [],
   });
   const response = await control(request({ op: 'entries.create-directory', ...ref('created'), requestId: randomUUID() }));
   assert.equal(response.status, 500);

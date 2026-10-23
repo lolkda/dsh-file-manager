@@ -22,16 +22,6 @@ export interface ConnectionService {
   fetch: { register(route: RouteRegistration): () => unknown };
 }
 
-export interface WorkspaceCandidateView {
-  id: string;
-  path: string;
-  title: string;
-}
-
-export interface WorkspaceRegistryService {
-  list(): WorkspaceCandidateView[];
-}
-
 export interface StorageTable {
   entries(): IterableIterator<[string, unknown]>;
   put(key: string, value: unknown): Promise<void>;
@@ -58,7 +48,6 @@ export interface StorageDomainService {
 export interface PluginContext {
   logger?: PluginLogger | undefined;
   connection: ConnectionService;
-  workspaceRegistry: WorkspaceRegistryService;
   storageDomain: StorageDomainService;
   /** Registers a Host-owned resource; the callback returns its disposer. */
   effect(callback: () => unknown): unknown;

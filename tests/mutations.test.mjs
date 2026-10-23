@@ -9,8 +9,8 @@ async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-write-'));
   const root = path.join(base, 'root');
   await mkdir(root);
-  const manager = createManager(options);
-  const grant = await manager.addRoot({ path: root });
+  const manager = createManager({ ...options, rootPath: root });
+  const grant = manager.getRoot();
   // Close before removing: an open manager still holds root descriptors, and
   // teardown must not race its pending work.
   t.after(async () => {
@@ -23,63 +23,68 @@ async function fixture(t, options = {}) {
 const requireMethod = (manager, name) => assert.equal(typeof manager[name], 'function', `${name} has not been implemented`);
 const exists = filename => stat(filename).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
 
-test('root grants are persisted before success and restored without a Session', async t => {
+test('the browsing root is opened rather than restored and needs no Session', async t => {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-persist-'));
   t.after(() => rm(base, { recursive: true, force: true }));
   const root = path.join(base, 'root');
   await mkdir(root);
-  const stateFile = path.join(base, 'roots.json');
-  const manager = createManager({ persistRoots: roots => writeFile(stateFile, JSON.stringify(roots)) });
-  const grant = await manager.addRoot({ path: root });
-  const saved = await readFile(stateFile, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; });
-  assert.ok(saved, 'a successful root grant must already be durable');
-  const restored = createManager({ initialRoots: JSON.parse(saved) });
-  assert.equal(restored.listRoots()[0].id, grant.id);
+  const manager = createManager({ rootPath: root });
+  const grant = manager.getRoot();
+  // Nothing about the root is durable, so a "restart" cannot depend on a store
+  // that a container rebuild may have left behind.
+  const restored = createManager({ rootPath: root });
+  t.after(() => restored.close());
+  assert.equal(restored.getRoot().id, grant.id, 'the same directory and identity yield the same root id');
+  assert.equal(restored.getRoot().path, root);
   assert.equal((await restored.list({ rootId: grant.id, path: '' })).entries.length, 0);
+  await manager.close();
 });
 
-test('failed root persistence does not publish an undurable grant', async t => {
-  const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-persist-fail-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const manager = createManager({ persistRoots: async () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); } });
-  await assert.rejects(manager.addRoot({ path: root }), { code: 'ENOSPC' });
-  assert.deepEqual(manager.listRoots(), []);
-});
-
-test('failed root removal persistence preserves the existing grant', async t => {
-  const { root, grant } = await fixture(t);
-  const manager = createManager({ initialRoots: [grant], persistRoots: async () => { throw new Error('unavailable'); } });
-  assert.equal(manager.listRoots().length, 1, 'restored grants must be usable');
-  await assert.rejects(manager.removeRoot({ rootId: grant.id }), /unavailable/);
-  assert.equal(manager.listRoots()[0].path, root);
-});
-
-test('concurrent grant changes retain both successful roots in persisted state', async t => {
-  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-concurrent-roots-'));
-  t.after(() => rm(base, { recursive: true, force: true }));
-  await mkdir(path.join(base, 'a')); await mkdir(path.join(base, 'b'));
-  let persisted = [];
-  const manager = createManager({ persistRoots: async roots => { persisted = structuredClone(roots); } });
-  await Promise.all([manager.addRoot({ path: path.join(base, 'a') }), manager.addRoot({ path: path.join(base, 'b') })]);
-  assert.equal(persisted.length, 2, 'concurrent persistence must not lose a grant');
-});
-
-test('closing a manager drains accepted writes and refuses newly submitted mutations', async t => {
-  const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-close-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  let started;
-  let finish;
-  const began = new Promise(resolve => { started = resolve; });
-  const gate = new Promise(resolve => { finish = resolve; });
-  const manager = createManager({ persistRoots: async () => { started(); await gate; } });
+test('closing a manager drains an accepted mutation and refuses newly submitted ones', async t => {
+  const { manager, root, ref } = await fixture(t);
   requireMethod(manager, 'close');
-  const adding = manager.addRoot({ path: root });
-  await began;
+  const rootId = manager.getRoot().id;
+  await writeFile(path.join(root, 'seed.txt'), 'seed');
+  const version = (await manager.io.stat(ref('seed.txt'))).version;
+  // Gate a call the queued mutation really awaits, so "accepted" is proven: the
+  // rename is inside the mutation queue and blocked before it can publish.
+  let entered; let release;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const stat = manager.io.stat.bind(manager.io);
+  let armed = false;
+  manager.io.stat = async input => { if (armed) { armed = false; entered(); await gate; } return stat(input); };
+
+  armed = true;
+  const accepted = manager.rename({ ...ref('seed.txt'), name: 'renamed.txt', expectedVersion: version });
+  await reached;
   const closing = manager.close();
-  await assert.rejects(manager.addRoot({ path: root }), { code: 'SERVICE_STOPPED' });
-  finish();
-  await adding;
-  await closing;
+  await assert.rejects(manager.createFile(ref('late.txt')), { code: 'SERVICE_STOPPED', status: 503 });
+  await assert.rejects(manager.createDirectory(ref('late-dir')), { code: 'SERVICE_STOPPED', status: 503 });
+  await assert.rejects(manager.prepareDelete({ items: [ref('renamed.txt')] }), { code: 'SERVICE_STOPPED', status: 503 });
+  release();
+  const settled = await Promise.allSettled([accepted, closing]);
+  assert.equal(settled[0].status, 'fulfilled', 'an accepted mutation must be drained, never rejected');
+  assert.equal(await exists(path.join(root, 'renamed.txt')), true, 'the drained mutation really published');
+  assert.equal(await exists(path.join(root, 'seed.txt')), false);
+  assert.equal(await exists(path.join(root, 'late.txt')), false, 'a refused submission must create nothing');
+  assert.equal(await exists(path.join(root, 'late-dir')), false);
+});
+
+test('after a manager has closed every entry point reports SERVICE_STOPPED', async t => {
+  const { manager, ref } = await fixture(t);
+  requireMethod(manager, 'close');
+  await manager.close();
+  assert.throws(() => manager.getRoot(), { code: 'SERVICE_STOPPED', status: 503 });
+  for (const call of [
+    () => manager.list(ref('')),
+    () => manager.readText(ref('file')),
+    () => manager.stat(ref('file')),
+    () => manager.io.stat(ref('file')),
+    () => manager.io.acquireDirectory(ref('')),
+  ]) {
+    await assert.rejects(call(), { code: 'SERVICE_STOPPED', status: 503 });
+  }
 });
 
 test('configured text limits apply to reads rather than only UI hints', async t => {

@@ -12,10 +12,10 @@ import { createTransferService } from '../dist/host/transfers.js';
 async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-zip-'));
   const root = path.join(base, 'root'); await mkdir(root);
-  const manager = createManager();
+  const manager = createManager({ rootPath: root });
   let service;
   t.after(async () => { await service?.close(); await manager.close(); await rm(base, { recursive: true, force: true }); });
-  const grant = await manager.addRoot({ path: root });
+  const grant = manager.getRoot();
   service = createTransferService({ manager: options.wrapManager ? options.wrapManager(manager) : manager, ...options });
   return { base, root, manager, grant, service };
 }

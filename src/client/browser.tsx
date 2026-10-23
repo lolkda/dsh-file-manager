@@ -11,11 +11,12 @@
  *    and one unrepresentable name never makes the whole directory unusable.
  */
 
-import type { ReactNode, RefObject } from 'react';
-import { Notice } from './notice.js';
-import { absoluteEntryPath, PathCopyNotice, usePathCopy } from './path-copy.js';
+import { type ReactNode, type RefObject } from 'react';
+import { ActionGroup } from './overlay.js';
+import { absoluteEntryPath, pathCopyNotification, usePathCopy } from './path-copy.js';
 import type { EntrySnapshot, UnaddressableEntry } from '../contracts/protocol.js';
 import type { Translate } from './i18n.js';
+import type { NotificationStore } from './notifications.js';
 import type { PrimitiveProps, UiPrimitives } from './ui.js';
 
 /** Re-exported so the panel and this module agree on the frozen shape. */
@@ -100,11 +101,11 @@ export interface FileCapabilities {
 }
 
 export interface FileActions {
-  dismissNotice(kind: 'directory-fallback' | 'clipboard' | 'operation-result'): void;
   openDirectory(id: string, path: string, append?: boolean): void;
   openFile(entry: EntrySnapshot): void;
   refresh(): void;
   toggleSelection(path: string, checked: boolean): void;
+  clearSelection(): void;
   beginName(kind: 'file' | 'directory' | 'rename'): void;
   prepareDelete(): void;
   copySelection(operation: 'copy' | 'move'): void;
@@ -119,21 +120,21 @@ export interface FileActions {
 export interface FileSectionProps {
   readonly t: Translate;
   readonly ui: UiPrimitives;
+  /** Plugin-owned, so a copy that finishes after unmount is still reported. */
+  readonly notifications: NotificationStore;
   readonly busy: number;
   readonly capabilities: FileCapabilities;
   readonly rootId: string;
-  readonly root: { id: string; label: string; path: string } | undefined;
+  /** The single Host root, or `null` when the Host has none to browse. */
+  readonly root: { id: string; label: string; path: string } | null;
   readonly directory: string;
   readonly listing: ListingState;
   readonly selection: readonly string[];
   readonly selected: string;
+  /** The file-task clipboard; also the gate that enables pasting. */
   readonly clipboard: { operation: 'copy' | 'move'; items: readonly unknown[] } | null;
-  readonly directoryFallback: boolean;
-  readonly clipboardNoticeVisible: boolean;
-  readonly operationResult: { status: string; results: readonly { path: string; status: string; error?: { code?: string } | undefined }[] } | null;
   readonly selectionSaving: boolean;
   readonly loadingMore: boolean;
-  readonly errorText: (failure: unknown) => string;
   readonly uploadInput: RefObject<HTMLInputElement>;
   readonly directoryInput: RefObject<HTMLInputElement>;
   readonly actions: FileActions;
@@ -163,8 +164,10 @@ function FileIcon(): ReactNode {
 export { FolderIcon, FileIcon };
 
 export function FileSection(props: FileSectionProps): ReactNode {
-  const { t, ui, busy, capabilities, rootId, root, directory, listing, selection, selected, clipboard, clipboardNoticeVisible, directoryFallback, operationResult, selectionSaving, loadingMore, errorText, uploadInput, directoryInput, actions } = props;
-  const pathCopy = usePathCopy();
+  const { t, ui, notifications, busy, capabilities, rootId, root, directory, listing, selection, selected, clipboard, selectionSaving, loadingMore, uploadInput, directoryInput, actions } = props;
+  // Copy outcomes are published where the click happens; the store is plugin
+  // owned, so a late result survives this component unmounting.
+  const pathCopy = usePathCopy(ui.writeClipboard, outcome => { notifications.publish(pathCopyNotification(t, outcome)); });
   const crumbs = directory ? directory.split('/') : [];
   const selectedEntries = listing.entries.filter(entry => selection.includes(entry.path));
   const selectable = (kind: string): boolean => ['file', 'directory', 'symlink'].includes(kind);
@@ -177,7 +180,7 @@ export function FileSection(props: FileSectionProps): ReactNode {
           the task bar reuse `.fm-pathbar`, so a fix written there would move
           them too (R20). */}
       <div className="fm-pathbar fm-breadcrumb-bar">
-        <nav className="fm-crumbs" aria-label={t('roots')}>
+        <nav className="fm-crumbs" aria-label={t('breadcrumbs')}>
           {root ? <ui.Button variant="ghost" size="sm" type="button" disabled={busy > 0} title={root.path} onClick={() => actions.openDirectory(rootId, '')}>{root.label}</ui.Button> : null}
           {crumbs.map((part, index) => (
             <span className="fm-crumb" key={crumbs.slice(0, index + 1).join('/')}>
@@ -198,44 +201,48 @@ export function FileSection(props: FileSectionProps): ReactNode {
         </ui.Button>
         {button({ t, ui }, 'refresh', { disabled: !rootId || busy > 0, onClick: actions.refresh, 'data-fm-action': 'refresh' })}
       </div>
-      <div className="fm-pathbar fm-actions">
-        {button({ t, ui }, 'newFile', { disabled: !capabilities.write || !rootId || busy > 0, onClick: () => actions.beginName('file'), 'data-fm-action': 'new-file' })}
-        {button({ t, ui }, 'newDirectory', { disabled: !capabilities.write || !rootId || busy > 0, onClick: () => actions.beginName('directory'), 'data-fm-action': 'new-directory' })}
-        {button({ t, ui }, 'rename', { disabled: !capabilities.write || selectedEntries.length !== 1 || busy > 0 || selectionSaving, onClick: () => actions.beginName('rename'), 'data-fm-action': 'rename' })}
-        {button({ t, ui }, 'delete', { disabled: !capabilities.write || !selectedEntries.length || busy > 0 || selectionSaving, onClick: actions.prepareDelete, 'data-fm-action': 'delete' })}
-        {button({ t, ui }, 'copy', { disabled: !capabilities.tasks || !selectedEntries.length || busy > 0 || selectionSaving, onClick: () => actions.copySelection('copy'), 'data-fm-action': 'copy' })}
-        {button({ t, ui }, 'copySelectedPaths', {
-          disabled: !root || !selectedEntries.length || busy > 0 || pathCopy.pending,
-          onClick: () => { if (root && !busy) void pathCopy.copy(selectedEntries.map(entry => absoluteEntryPath(root.path, entry.path))); },
-          'data-fm-action': 'copy-selected-paths',
-        })}
-        {button({ t, ui }, 'cut', { disabled: !capabilities.tasks || !selectedEntries.length || busy > 0 || selectionSaving, onClick: () => actions.copySelection('move'), 'data-fm-action': 'cut' })}
-        {button({ t, ui }, 'paste', { disabled: !capabilities.tasks || !clipboard || !rootId || busy > 0, onClick: actions.preparePaste, 'data-fm-action': 'paste' })}
-        {button({ t, ui }, 'uploadFiles', { disabled: !capabilities.transfers || !rootId || busy > 0, onClick: () => actions.pickUpload('files'), 'data-fm-action': 'upload-files' })}
-        {button({ t, ui }, 'uploadDirectory', { disabled: !capabilities.transfers || !rootId || busy > 0, onClick: () => actions.pickUpload('directory'), 'data-fm-action': 'upload-directory' })}
-        {button({ t, ui }, 'download', { disabled: !capabilities.transfers || !rootId || selectedEntries.length > 1 || busy > 0, onClick: actions.beginDownload, 'data-fm-action': 'download' })}
-        {button({ t, ui }, 'reference', { disabled: !capabilities.references || !selectedEntries.length || busy > 0, onClick: actions.beginReference, 'data-fm-action': 'reference' })}
+      <div className="fm-pathbar fm-actions fm-file-toolbar">
+        <ActionGroup label={t('create')} name="create">
+          {button({ t, ui }, 'newFile', { disabled: !capabilities.write || !rootId || busy > 0, onClick: () => actions.beginName('file'), 'data-fm-action': 'new-file' })}
+          {button({ t, ui }, 'newDirectory', { disabled: !capabilities.write || !rootId || busy > 0, onClick: () => actions.beginName('directory'), 'data-fm-action': 'new-directory' })}
+        </ActionGroup>
+        <ActionGroup label={t('upload')} name="upload">
+          {button({ t, ui }, 'uploadFiles', { disabled: !capabilities.transfers || !rootId || busy > 0, onClick: () => actions.pickUpload('files'), 'data-fm-action': 'upload-files' })}
+          {button({ t, ui }, 'uploadDirectory', { disabled: !capabilities.transfers || !rootId || busy > 0, onClick: () => actions.pickUpload('directory'), 'data-fm-action': 'upload-directory' })}
+        </ActionGroup>
+        <ActionGroup label={t('moreActions')} name="more">
+          {button({ t, ui }, 'rename', { disabled: !capabilities.write || selectedEntries.length !== 1 || busy > 0 || selectionSaving, onClick: () => actions.beginName('rename'), 'data-fm-action': 'rename' })}
+          {button({ t, ui }, 'delete', { disabled: !capabilities.write || !selectedEntries.length || busy > 0 || selectionSaving, onClick: actions.prepareDelete, 'data-fm-action': 'delete' })}
+          {button({ t, ui }, 'copy', { disabled: !capabilities.tasks || !selectedEntries.length || busy > 0 || selectionSaving, onClick: () => actions.copySelection('copy'), 'data-fm-action': 'copy' })}
+          {button({ t, ui }, 'copySelectedPaths', {
+            disabled: !root || !selectedEntries.length || busy > 0 || pathCopy.pending,
+            onClick: () => { if (root && !busy) void pathCopy.copy(selectedEntries.map(entry => absoluteEntryPath(root.path, entry.path))); },
+            'data-fm-action': 'copy-selected-paths',
+          })}
+          {button({ t, ui }, 'cut', { disabled: !capabilities.tasks || !selectedEntries.length || busy > 0 || selectionSaving, onClick: () => actions.copySelection('move'), 'data-fm-action': 'cut' })}
+          {button({ t, ui }, 'paste', { disabled: !capabilities.tasks || !clipboard || !rootId || busy > 0, onClick: actions.preparePaste, 'data-fm-action': 'paste' })}
+          {button({ t, ui }, 'download', { disabled: !capabilities.transfers || !rootId || selectedEntries.length > 1 || busy > 0, onClick: actions.beginDownload, 'data-fm-action': 'download' })}
+          {button({ t, ui }, 'reference', { disabled: !capabilities.references || !selectedEntries.length || busy > 0, onClick: actions.beginReference, 'data-fm-action': 'reference' })}
+          {button({ t, ui }, 'clearSelection', {
+            disabled: !rootId || busy > 0 || !selectedEntries.length,
+            onClick: () => { if (rootId && !busy && selectedEntries.length) actions.clearSelection(); },
+            'data-fm-action': 'clear-selection',
+          })}
+        </ActionGroup>
         <input type="file" multiple hidden ref={uploadInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadFiles')} data-fm-upload-files />
         {/* React 18 has no typed webkitdirectory prop; the empty string emits
             the native boolean attribute rather than dropping an unknown boolean. */}
         <input type="file" {...{ webkitdirectory: '' }} multiple hidden ref={directoryInput} disabled={!capabilities.transfers} onChange={actions.pickFiles} aria-label={t('uploadDirectory')} data-fm-upload-directory-input />
       </div>
-      <PathCopyNotice t={t} ui={ui} result={pathCopy.result} dismiss={pathCopy.dismiss} />
-      {directoryFallback ? <Notice t={t} ui={ui} id="directory-fallback" onDismiss={() => actions.dismissNotice('directory-fallback')}>{t('directoryFallback')}</Notice> : null}
-      {clipboard && clipboardNoticeVisible ? <Notice t={t} ui={ui} id="clipboard" onDismiss={() => actions.dismissNotice('clipboard')}>{`${t('clipboard')}: ${t(clipboard.operation === 'move' ? 'cut' : 'copy')} · ${clipboard.items.length} ${t('items')}`}</Notice> : null}
-      {selectedEntries.length > 0 ? <div className="fm-muted" style={{ padding: '4px 12px' }}>{`${selectedEntries.length} ${t('selected')}`}</div> : null}
-      {operationResult ? (
-        <Notice t={t} ui={ui} id="operation-result" onDismiss={() => actions.dismissNotice('operation-result')}>
-          <div data-fm-operation-result={operationResult.status}>
-            {t(`status.${operationResult.status}`)}
-            {operationResult.results.map(result => (
-              <div key={`${result.path}:${result.status}`}>{`${result.path}: ${t(`status.${result.status}`)}${result.error ? ` · ${errorText(result.error)}` : ''}`}</div>
-            ))}
-          </div>
-        </Notice>
-      ) : null}
+      {/* Operation results, the file-task clipboard summary, the directory-picker
+          fallback and copy outcomes are events: they are published to the
+          notification store at the action source and shown in the notification
+          drawer, so nothing pushes the file list down any more. */}
       <div className="fm-scroll" aria-busy={busy > 0}>
-        {!rootId ? <div className="fm-placeholder"><FolderIcon size={34} />{busy ? t('loading') : t('emptyRoots')}</div> : null}
+        {/* No root is an honest dead end, not an invitation: the Host either has a
+            browsable directory or it does not, and this panel cannot add one. The
+            attribute separates "still asking" from "the Host has none". */}
+        {!rootId ? <div className="fm-placeholder" data-fm-no-root={busy > 0 ? 'loading' : 'unavailable'}>{busy ? t('loading') : t('emptyRoots')}</div> : null}
         {rootId && listing.entries.length === 0 && listing.unaddressable.length === 0 ? <div className="fm-placeholder">{busy ? t('loading') : t('empty')}</div> : null}
         {listing.entries.map(entry => (
           <div key={entry.path} className="fm-entryline">
@@ -251,7 +258,11 @@ export function FileSection(props: FileSectionProps): ReactNode {
               variant="ghost" size="sm" type="button" className={`fm-row${entry.path === selected ? ' fm-active' : ''}`}
               disabled={busy > 0 || !['directory', 'file'].includes(entry.kind)}
               title={['directory', 'file'].includes(entry.kind) ? entry.name : t('special')}
-              onClick={() => (entry.kind === 'directory' ? actions.openDirectory(rootId, entry.path) : actions.openFile(entry))}
+              onClick={() => {
+                if (busy) return;
+                if (entry.kind === 'directory') actions.openDirectory(rootId, entry.path);
+                else if (entry.kind === 'file') actions.openFile(entry);
+              }}
               data-fm-entry={entry.kind} data-fm-path={entry.path}
             >
               {entry.kind === 'directory' ? <FolderIcon size={17} /> : <FileIcon />}

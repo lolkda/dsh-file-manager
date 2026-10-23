@@ -28,7 +28,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { act, editorEdit, editorProps, node, nodes, setup, textOf, uiBoundary } from './client-harness.mjs';
+import { act, clickRootCrumb, editorEdit, editorProps, node, nodes, setup, textOf, uiBoundary } from './client-harness.mjs';
 import { loadClientModule } from './client-module-loader.mjs';
 
 const ACK_LABEL = '我确认永久删除不可恢复';
@@ -296,12 +296,11 @@ test('a completed directory deletion invalidates its whole prefix while drafts a
     seed: async root => { await mkdir(path.join(root, 'other')); await writeFile(path.join(root, 'other/sibling.txt'), 'sibling\n'); },
   });
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
   editorEdit(view, '目录删除前的草稿');
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await view.click({ 'data-fm-entry': 'directory', 'data-fm-path': 'other' });
   await view.click({ 'data-fm-entry': 'file', 'data-fm-path': 'other/sibling.txt' });
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await select(view, 'folder');
   await view.click({ 'data-fm-action': 'delete' });
   assert.equal(phase(view, 'ready'), 1);
@@ -315,7 +314,8 @@ test('a completed directory deletion invalidates its whole prefix while drafts a
   await activateTab(view, 'folder/hello.txt');
   assert.equal(nodes(view.renderer, { 'data-fm-missing': true }).length, 1, 'the document under the deleted directory must be reported missing');
   assert.equal(editorProps(view.renderer)?.value, '目录删除前的草稿', 'the unsaved draft of a deleted document must survive');
-  assert.equal(node(view.renderer, { 'data-fm-action': 'save' }).props.disabled, true, 'a missing document must not be saveable');
+  assert.equal(editorProps(view.renderer)?.canWrite, false, 'a missing document must not be editable');
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'save' }).length, 0, 'a missing document must not expose save');
 
   await activateTab(view, 'other/sibling.txt');
   assert.equal(nodes(view.renderer, { 'data-fm-missing': true }).length, 0, 'a document outside the deleted tree must not be reported missing');
@@ -345,15 +345,13 @@ test('a partly failed directory deletion marks only the documents that really va
   });
   try {
     await view.openHello();
-    await view.click({ 'data-fm-action': 'edit' });
     editorEdit(view, '会被删除的草稿');
-    await view.click({ 'data-fm-root': true });
+    await clickRootCrumb(view);
     await view.click({ 'data-fm-entry': 'directory', 'data-fm-path': 'folder' });
     await view.click({ 'data-fm-entry': 'directory', 'data-fm-path': 'folder/keep' });
     await view.click({ 'data-fm-entry': 'file', 'data-fm-path': 'folder/keep/locked.txt' });
-    await view.click({ 'data-fm-action': 'edit' });
     editorEdit(view, '幸存的草稿');
-    await view.click({ 'data-fm-root': true });
+    await clickRootCrumb(view);
     await select(view, 'folder');
     await view.click({ 'data-fm-action': 'delete' });
     assert.equal(phase(view, 'ready'), 1);
@@ -369,7 +367,8 @@ test('a partly failed directory deletion marks only the documents that really va
     await activateTab(view, 'folder/hello.txt');
     assert.equal(nodes(view.renderer, { 'data-fm-missing': true }).length, 1, `the open document whose file really vanished must be reported missing${observed}`);
     assert.equal(editorProps(view.renderer)?.value, '会被删除的草稿', `the draft of a document that really vanished must survive${observed}`);
-    assert.equal(node(view.renderer, { 'data-fm-action': 'save' }).props.disabled, true);
+    assert.equal(editorProps(view.renderer)?.canWrite, false);
+    assert.equal(nodes(view.renderer, { 'data-fm-action': 'save' }).length, 0);
 
     await activateTab(view, 'folder/keep/locked.txt');
     assert.equal(nodes(view.renderer, { 'data-fm-missing': true }).length, 0, `an open document whose file survived a failed directory deletion must not be reported missing${observed}`);

@@ -11,9 +11,8 @@
  *    once — the render that follows must not dispatch again.
  *  - A different `documentId` is a different document: the view is rebuilt so an
  *    undo stack can never reach across files.
- *  - Everything else — mode, grammar, budget — is a *configuration* change on the
- *    live view, so switching preview/edit or crossing the highlight budget keeps
- *    the text, the selection and the history.
+ *  - Everything else — permissions, grammar, wrapping, budget — is a
+ *    *configuration* change on the live view, keeping text, selection and history.
  *
  * Two independent degradations exist, and they are not the same thing:
  *
@@ -70,7 +69,6 @@ export interface CodeEditorProps {
   readonly path: string;
   /** The normalized draft to render. Authoritative. */
   readonly value: string;
-  readonly mode: 'preview' | 'edit';
   readonly canWrite: boolean;
   /** The grammar hint the host derived from the filename, if it could. */
   readonly languageHint: string | undefined;
@@ -101,11 +99,10 @@ function editorTheme(): Extension {
       backgroundColor: 'var(--dsw-alias-bg-base)',
       color: 'var(--dsw-alias-label-primary)',
     },
-    // The panel's own editor surface draws one focus ring inside the box; the
-    // base theme's dotted outline would be a second, literal-coloured one.
+    // Keep the editing surface borderless when focused, overriding CodeMirror's
+    // default dotted outline without changing other controls' focus indicators.
     '&.cm-focused': {
-      outline: '2px solid var(--dsw-alias-brand-primary)',
-      outlineOffset: '-2px',
+      outline: 'none',
     },
     '.cm-scroller': {
       fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
@@ -130,7 +127,10 @@ function noteMessage(state: HighlightState, t: Translate): string | null {
 }
 
 export function CodeEditor(props: CodeEditorProps): ReactNode {
-  const { mode, canWrite, value, ariaLabel, t } = props;
+  const { canWrite, value, ariaLabel, t } = props;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const wrappingRef = useRef(false);
+  const [wrapping, setWrapping] = useState(false);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   /** Latest props, readable from CodeMirror callbacks that outlive a render. */
@@ -169,7 +169,42 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
     editable: new Compartment(),
     readOnly: new Compartment(),
     attributes: new Compartment(),
+    wrapping: new Compartment(),
   }));
+
+  // Container width, not viewport width: the file panel may share a wide window.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (root === null) return;
+    const container = root.closest<HTMLElement>('.dsh-fm') ?? root;
+    const viewWindow = root.ownerDocument.defaultView;
+    let active = true;
+    const measure = (observedWidth?: number): void => {
+      if (!active) return;
+      const width = observedWidth ?? container.clientWidth;
+      // Hidden retained viewers measure zero; that is not a new layout decision.
+      if (!Number.isFinite(width) || width <= 0) return;
+      const next = width <= 600;
+      if (wrappingRef.current === next) return;
+      wrappingRef.current = next;
+      setWrapping(next);
+      const view = viewRef.current;
+      if (view !== null) view.dispatch({ effects: compartments.wrapping.reconfigure(next ? EditorView.lineWrapping : []) });
+    };
+    measure();
+    const Observer = viewWindow?.ResizeObserver;
+    if (typeof Observer === 'function') {
+      const observer = new Observer(entries => {
+        const entry = entries.find(item => item.target === container);
+        if (entry) measure(entry.contentRect.width);
+      });
+      observer.observe(container);
+      return () => { active = false; observer.disconnect(); };
+    }
+    const resize = (): void => { measure(); };
+    viewWindow?.addEventListener('resize', resize);
+    return () => { active = false; viewWindow?.removeEventListener('resize', resize); };
+  }, [compartments]);
 
   const failed = failedDocument !== null && failedDocument === props.documentId;
   const languageId = languageIdFor(props.languageHint);
@@ -183,8 +218,8 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
   // not cross the budget reconfigures nothing.
   const support = dialect === null ? null : languageExtensionFor(props.languageHint, props.path);
   const grammar = highlightGrammar(support, props.value);
-  const editable = mode === 'edit' && canWrite;
-  const readOnly = mode !== 'edit' || !canWrite;
+  const editable = canWrite;
+  const readOnly = !canWrite;
   const note = noteMessage(state, t);
   // A language label only where there is a language to name; in the plain state
   // the note already says the document has no grammar, and repeating it would
@@ -224,7 +259,7 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
       // Reporting is an edit event, so it is only ever right for a surface the
       // user can type into, and only when the owner has not already been told
       // this draft: degrading must never manufacture an edit of its own.
-      if (current.mode === 'edit' && current.canWrite
+      if (current.canWrite
         && committed !== current.value && committed !== reportedRef.current) {
         reportedRef.current = committed;
         current.onChange(committed);
@@ -296,6 +331,7 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
             compartments.editable.of(EditorView.editable.of(editable)),
             compartments.readOnly.of(EditorState.readOnly.of(readOnly)),
             compartments.attributes.of(surfaceAttributes(propsRef.current.ariaLabel)),
+            compartments.wrapping.of(wrappingRef.current ? EditorView.lineWrapping : []),
             // The stylesheet renders tabs two columns wide, so the state has to
             // agree; changing only the CSS would leave tabs at the default four.
             EditorState.tabSize.of(2),
@@ -308,7 +344,7 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
               const current = propsRef.current;
               // Only an editable surface can report an edit: a preview or a Host
               // without the write capability cannot have produced one.
-              if (current.mode !== 'edit' || !current.canWrite) return;
+              if (!current.canWrite) return;
               if (update.transactions.some(transaction => transaction.annotation(externalSync) === true)) return;
               const text = update.state.doc.toString();
               reportedRef.current = text;
@@ -349,7 +385,7 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.documentId, failed, compartments]);
 
-  // Grammar, mode, editability and the accessible name are configuration, not
+  // Grammar, editability and the accessible name are configuration, not
   // identity: reconfiguring keeps the text, the selection and the undo history,
   // and the accessible name follows a rename or a locale change instead of
   // sticking to whatever it was at mount.
@@ -427,9 +463,11 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
 
   return (
     <div
+      ref={rootRef}
       className="fm-code"
       data-fm-code
-      data-fm-code-mode={mode}
+      data-fm-code-mode={canWrite ? 'edit' : 'preview'}
+      data-fm-code-wrap={wrapping}
       data-fm-code-language={languageId}
       data-fm-code-highlight={state}
     >
@@ -439,11 +477,11 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
           would keep claiming `flex: 1` as an empty box and squeeze the control
           the user actually has to type into. */}
       {state === 'error' ? null : <div className="fm-code-mount" ref={hostRef} />}
-      {state !== 'error' ? null : mode === 'edit'
+      {state !== 'error' ? null : canWrite
         ? (
           <textarea
             className="fm-editor" data-fm-code-fallback="edit" value={fallbackValue} readOnly={!canWrite}
-            spellCheck={false} aria-label={ariaLabel}
+            spellCheck={false} aria-label={ariaLabel} wrap={wrapping ? 'soft' : 'off'}
             onChange={event => {
               // The fallback stands in for the same surface as the editor, so it
               // reports on the same condition: without the write capability there
@@ -460,7 +498,9 @@ export function CodeEditor(props: CodeEditorProps): ReactNode {
             }}
           />
         )
-        : <pre data-fm-code-fallback="preview">{fallbackValue}</pre>}
+        : <pre data-fm-code-fallback="preview" tabIndex={0} aria-label={ariaLabel} onKeyDown={event => {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') event.preventDefault();
+        }}>{fallbackValue}</pre>}
     </div>
   );
 }
@@ -491,7 +531,7 @@ function saveKeyBinding(
       // `false` says this handler is gone rather than "not handled yet".
       if (!alive.current) return false;
       const current = getProps();
-      if (current.mode === 'edit' && current.canWrite) current.onSave();
+      if (current.canWrite) current.onSave();
       return true;
     },
   };

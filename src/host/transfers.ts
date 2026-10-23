@@ -381,7 +381,10 @@ export function createTransferService(options: TransferServiceOptions): Transfer
     const rootId = String(input.rootId);
     const entry = await manager.io.stat({ rootId: input.rootId, path: selected, maxBytes: Math.min(limits.maxFileBytes, limits.maxTaskBytes), signal });
     if (input.expectedVersion !== undefined && entry.version !== input.expectedVersion) fail('VERSION_CONFLICT', 'The source changed after it was selected.', 409);
-    const base = selected.split('/').at(-1) || manager.listRoots().find(root => root.id === input.rootId)?.label || 'download';
+    // An archive needs a member name, and the root's label is its own path (`/`),
+    // which no archive member may be called.
+    const rootLabel = manager.getRoot().label;
+    const base = selected.split('/').at(-1) || (rootLabel === '/' ? 'root' : rootLabel);
     relativePath(base);
     const items: TransferItem[] = [];
     let total = 0;

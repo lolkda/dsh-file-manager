@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import React from 'react';
 import {
@@ -118,8 +119,7 @@ async function openEditor(testContext, props = {}, { raf = true, platform, befor
     // passed as the component's translator, which would only surface later as an
     // unrelated TypeError inside the component.
     props: {
-      documentId: 'doc-1', path: 'sample.ts', value: TS_SAMPLE, mode: 'preview',
-      canWrite: true, languageHint: 'typescript', ariaLabel: 'Code', t: translate,
+      documentId: 'doc-1', path: 'sample.ts', value: TS_SAMPLE, canWrite: true, languageHint: 'typescript', ariaLabel: 'Code', t: translate,
       onChange: text => { state.calls.push(text); }, onSave: () => { state.saveCalls += 1; },
       ...props,
     },
@@ -274,7 +274,7 @@ test('the shipped language map covers the frozen first batch and nothing beyond 
 });
 
 test('the reason node never disagrees with the declared highlight state', async testContext => {
-  const state = await openEditor(testContext, { mode: 'preview', languageHint: 'typescript', value: TS_SAMPLE });
+  const state = await openEditor(testContext, { canWrite: false, languageHint: 'typescript', value: TS_SAMPLE });
   const cases = [
     [{ languageHint: 'typescript', value: TS_SAMPLE }, 'active'],
     [{ languageHint: undefined, value: TS_SAMPLE }, 'plain'],
@@ -334,7 +334,7 @@ test('the shipped bundle exposes the frozen editor surface', async testContext =
 });
 
 test('preview renders real syntax colours drawn only from theme tokens', async testContext => {
-  const state = await openEditor(testContext, { mode: 'preview' });
+  const state = await openEditor(testContext, { canWrite: false });
   const { container, handle } = state;
   const host = editorHostOf(container);
   assert.equal(host.getAttribute('data-fm-code-mode'), 'preview');
@@ -358,7 +358,7 @@ test('preview renders real syntax colours drawn only from theme tokens', async t
 });
 
 test('an unsupported hint stays plain, keeps its text and is never multi-coloured', async testContext => {
-  const state = await openEditor(testContext, { mode: 'preview', path: 'sample.bin', languageHint: undefined });
+  const state = await openEditor(testContext, { canWrite: false, path: 'sample.bin', languageHint: undefined });
   const { container, handle } = state;
   assert.equal(highlightState(container), 'plain');
   assert.equal(editorHostOf(container).getAttribute('data-fm-code-language'), 'plaintext');
@@ -370,7 +370,7 @@ test('an unsupported hint stays plain, keeps its text and is never multi-coloure
 });
 
 test('markup in a file is displayed as text and never turned into live DOM', async testContext => {
-  const state = await openEditor(testContext, { mode: 'preview', path: 'page.html', value: HTML_SAMPLE, languageHint: 'html' });
+  const state = await openEditor(testContext, { canWrite: false, path: 'page.html', value: HTML_SAMPLE, languageHint: 'html' });
   const { container, handle } = state;
   assert.equal(highlightState(container), 'active', 'the html grammar must apply');
   assert.equal(container.querySelector('script'), null, 'a displayed script tag must not become a script element');
@@ -382,7 +382,7 @@ test('markup in a file is displayed as text and never turned into live DOM', asy
 });
 
 test('empty document mounts without content, colour or spurious change', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', value: '', path: 'empty.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: '', path: 'empty.ts', languageHint: 'typescript' });
   assert.equal(highlightState(state.container), 'active', 'an empty document is still a normal highlighted document');
   assert.equal(readEditorText(state.container), '');
   assert.deepEqual(state.calls, [], 'mounting must never report a change');
@@ -393,7 +393,7 @@ for (const [name, bytes, expected] of [['exactly 1 MiB', 1048576, 'active'], ['1
     const value = asciiBytes(bytes);
     assert.equal(utf8Bytes(value), bytes, 'fixture self-check: the sample must be exactly the intended byte size');
     assert.ok(longestLine(value) <= 20000, 'fixture self-check: the line budget must not be the reason here');
-    const state = await openEditor(testContext, { mode: 'edit', value, path: 'size.ts', languageHint: 'typescript' });
+    const state = await openEditor(testContext, { value, path: 'size.ts', languageHint: 'typescript' });
       assert.equal(highlightState(state.container), expected);
     assert.equal(visibleText(state.container), value, 'the budget must never truncate the document');
     if (expected === 'limited') requireNote(state.container, 'limited', 'code.highlightLimited');
@@ -404,7 +404,7 @@ for (const [name, unitCount, expected] of [['exactly 20000 UTF-16 units', 20000,
   test(`the line budget counts UTF-16 units per line: ${name}`, async testContext => {
     const value = `${'a'.repeat(unitCount)}\nplain\n`;
     assert.ok(utf8Bytes(value) < 1048576, 'fixture self-check: the byte budget must not be the reason here');
-    const state = await openEditor(testContext, { mode: 'edit', value, path: 'line.ts', languageHint: 'typescript' });
+    const state = await openEditor(testContext, { value, path: 'line.ts', languageHint: 'typescript' });
       assert.equal(highlightState(state.container), expected);
     assert.equal(longestLine(value), unitCount);
   });
@@ -415,7 +415,7 @@ test('the byte budget uses encoded size, not JavaScript string length (CJK trap)
   assert.ok(value.length < 1048576, 'fixture self-check: the JavaScript length stays under 1 MiB');
   assert.ok(utf8Bytes(value) > 1048576, 'fixture self-check: the encoded size exceeds 1 MiB');
   assert.ok(longestLine(value) < 20000, 'fixture self-check: the line budget must not be the reason here');
-  const state = await openEditor(testContext, { mode: 'edit', value, path: 'cjk.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value, path: 'cjk.ts', languageHint: 'typescript' });
   assert.equal(highlightState(state.container), 'limited', 'a character-count comparison would wrongly stay highlighted');
   assert.equal(visibleText(state.container), value);
 });
@@ -433,19 +433,19 @@ test('the shipped classifier agrees with the rendered editor at both boundaries'
   for (const [value, expected] of cases) {
     assert.equal(classifyHighlightBudget(value), expected, `classifyHighlightBudget disagreed for a ${value.length}-character sample`);
   }
-  await state.render({ mode: 'edit', value: cases[2][0], path: 'x.ts', languageHint: 'typescript' });
+  await state.render({ value: cases[2][0], path: 'x.ts', languageHint: 'typescript' });
   assert.equal(highlightState(state.container), 'limited', 'the classifier and the rendered state must not diverge');
 });
 
 test('preview never saves, and a non-writable edit view stays read-only for the keyboard path', async testContext => {
-  const state = await openEditor(testContext, { mode: 'preview' });
+  const state = await openEditor(testContext, { canWrite: false });
   const { container, handle } = state;
   const content = container.querySelector('.cm-content');
   content.dispatchEvent(new handle.window.KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
   await flushDom();
   assert.equal(state.saveCalls, 0, 'preview has nothing to save and must not call onSave');
 
-  await state.render({ mode: 'edit', canWrite: false });
+  await state.render({ canWrite: false });
   const readOnlyContent = container.querySelector('.cm-content');
   // Permission semantics: a preview, or any non-writable document, is not
   // content-editable at all and announces aria-readonly.
@@ -457,8 +457,8 @@ test('preview never saves, and a non-writable edit view stays read-only for the 
   assert.equal(state.saveCalls, 0, 'a non-writable document must not save');
 });
 
-test('edit mode reports a real document edit through onChange and saves on Ctrl/Cmd+S', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', canWrite: true });
+test('a writable surface reports a real document edit through onChange and saves on Ctrl/Cmd+S', async testContext => {
+  const state = await openEditor(testContext, { canWrite: true });
   const { container, handle } = state;
   const host = editorHostOf(container);
   assert.equal(host.getAttribute('data-fm-code-mode'), 'edit');
@@ -479,7 +479,7 @@ test('edit mode reports a real document edit through onChange and saves on Ctrl/
 });
 
 test('programmatic sync never echoes back, never rebuilds the view and keeps the document', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit' });
+  const state = await openEditor(testContext, { canWrite: true });
   const { container } = state;
   const before = editorViewOf(container);
   await act(async () => { await state.render({ value: TS_SAMPLE }); });
@@ -494,7 +494,7 @@ test('programmatic sync never echoes back, never rebuilds the view and keeps the
 });
 
 test('two documents keep independent text, and a rename relanguages without touching the draft', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', documentId: 'doc-a', value: 'first\n' });
+  const state = await openEditor(testContext, { documentId: 'doc-a', value: 'first\n' });
   const { container, handle } = state;
   const second = handle.document.createElement('div');
   handle.body.appendChild(second);
@@ -518,7 +518,7 @@ test('a missing editor capability degrades to an editable plain-text fallback', 
   // This proves the capability pre-check fallback only: with no
   // requestAnimationFrame the component must not build a CodeMirror view at all.
   // A parser failure is a different path and is covered separately below.
-  const state = await openEditor(testContext, { mode: 'edit', canWrite: true }, { raf: false });
+  const state = await openEditor(testContext, { canWrite: true }, { raf: false });
   const { container, handle } = state;
   assert.equal(highlightState(container), 'error');
   requireNote(container, 'error', 'code.highlightUnavailable');
@@ -535,14 +535,14 @@ test('a missing editor capability degrades to an editable plain-text fallback', 
 
 test('incomplete syntax stays highlighted and is never treated as a failure', async testContext => {
   const broken = 'const broken = "unterminated\nfunction f( { \n/* open comment\n';
-  const state = await openEditor(testContext, { mode: 'edit', value: broken, path: 'broken.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: broken, path: 'broken.ts', languageHint: 'typescript' });
   assert.equal(highlightState(state.container), 'active', 'incomplete syntax is not a fault');
   assert.equal(noteState(state.container), null, 'a highlighted document has no reason node');
   assert.equal(readEditorText(state.container), broken);
 });
 
 test('the real document store keeps drafts across edits and external snapshots', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit' });
+  const state = await openEditor(testContext, { canWrite: true });
   const { client, handle } = state;
   // A dedicated container: `openEditor` already created a react root, and React
   // refuses two roots on the same node.
@@ -555,7 +555,7 @@ test('the real document store keeps drafts across edits and external snapshots',
     const snapshot = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
     const document = snapshot.documents.find(item => item.id === documentId);
     return React.createElement(client.CodeEditor, {
-      documentId, path: document.path, value: document.draft, mode: 'edit', canWrite: true,
+      documentId, path: document.path, value: document.draft, canWrite: true,
       languageHint: 'typescript', ariaLabel: 'Code', t: translate,
       onChange: text => { changes.push(text); store.edit(documentId, text); },
       onSave: () => {},
@@ -595,8 +595,61 @@ test('the real document store keeps drafts across edits and external snapshots',
   boundDestroyed = true;
 });
 
+/**
+ * The `outline` value of the last CSSOM rule targeting a focused editor of the
+ * mounted view, or null when no such rule exists.
+ *
+ * A qualifying rule has the exact `selectorText` `.<themeClass>.cm-focused`,
+ * where `<themeClass>` is a generated class the mounted editor itself carries
+ * (CodeMirror gives every theme its own generated prefix). Reading the live
+ * CSSOM instead of parsing style text keeps this exact, and taking the *last*
+ * such rule in document order expresses the cascade: same-specificity focused
+ * rules resolve in source order, so the final declaration is what a focused
+ * editor renders. The base theme's dotted rule stays in the sheet (removing it
+ * is not required), it just must not be the last word.
+ */
+function lastFocusedOutlineRule(handle, editor) {
+  const classes = new Set(editor.classList);
+  let last = null;
+  for (const node of handle.document.querySelectorAll('style')) {
+    const sheet = node.sheet;
+    if (!sheet?.cssRules) continue;
+    for (const rule of sheet.cssRules) {
+      const match = /^\.([^.]+)\.cm-focused$/.exec(rule.selectorText ?? '');
+      if (!match || !classes.has(match[1])) continue;
+      const outline = rule.style?.getPropertyValue('outline') ?? '';
+      if (outline !== '') last = outline;
+    }
+  }
+  return last;
+}
+
+test('the focused editor resolves to no outline in the shipped cascade', async testContext => {
+  const state = await openEditor(testContext, { canWrite: true });
+  const { container, handle } = state;
+  assert.ok(container.querySelector('.cm-editor'), 'the fixture must mount the real editor');
+  // Real focus on the rendered surface; CodeMirror applies `.cm-focused`
+  // through its own focus handling one tick after the DOM focus event.
+  const content = container.querySelector('.cm-content');
+  content.focus();
+  await flushDom();
+  const editor = container.querySelector('.cm-editor');
+  assert.equal(editor.classList.contains('cm-focused'), true,
+    'focusing the content must mark the editor as focused, or no focused rule would apply at all');
+  assert.equal(content.style.outline, '', 'focus must not install an inline outline');
+  assert.equal(lastFocusedOutlineRule(handle, editor), 'none',
+    'the last focused-editor outline rule in the shipped cascade must set outline:none (not a visual check; jsdom cannot paint)');
+  // The panel stylesheet the bundle ships agrees with the theme rule.
+  const bundle = await readFile(new URL('../dist/client.js', import.meta.url), 'utf8');
+  assert.match(bundle, /\.dsh-fm \[data-fm-code\] \.cm-editor\.cm-focused\{outline:none\}/,
+    'the shipped panel stylesheet must keep the focused editor borderless');
+  // The removal is scoped: the shared control focus ring must survive untouched.
+  assert.ok(bundle.includes('.dsh-fm button:focus-visible,.dsh-fm input:focus-visible,.dsh-fm textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}'),
+    'buttons, inputs and fallback textareas must retain the shared visible focus ring');
+});
+
 test('unmounting releases the editor and stops reporting events', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit' });
+  const state = await openEditor(testContext, { canWrite: true });
   const { container, handle } = state;
   const content = container.querySelector('.cm-content');
   // Captured before teardown: the window is closed by then, and the point of the
@@ -615,7 +668,7 @@ test('a superseded view cannot save, and the view that replaced it still can', a
   // A document switch keeps the component instance and builds a fresh view, so a
   // per-component "released" flag is not enough: the new mount would reset it and
   // the superseded binding would come back to life. The guard has to be per view.
-  const state = await openEditor(testContext, { mode: 'edit', documentId: 'doc-a', value: 'const a = 1;\n', path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { documentId: 'doc-a', value: 'const a = 1;\n', path: 'x.ts', languageHint: 'typescript' });
   const { container, handle } = state;
   const supersededContent = container.querySelector('.cm-content');
   const supersededView = editorViewOf(container);
@@ -635,7 +688,7 @@ test('a superseded view cannot save, and the view that replaced it still can', a
 });
 
 test('no completion or diagnostic surface is attached to the editor', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit' });
+  const state = await openEditor(testContext, { canWrite: true });
   const { container, handle } = state;
   container.querySelector('.cm-content').dispatchEvent(new handle.window.KeyboardEvent('keydown', { key: ' ', ctrlKey: true, bubbles: true, cancelable: true }));
   await flushDom();
@@ -652,7 +705,7 @@ test('replayed auto-close trigger keys never rewrite the document in the JSX dia
   // automatic-edit surface stays empty. The auto-close typing behaviours remain a
   // browser-verification item (SPEC R21.11), and no fake DOM listener is added here
   // to cancel a library behaviour.
-  const state = await openEditor(testContext, { mode: 'edit', path: 'app.jsx', languageHint: 'javascript', value: 'const view = <div>' });
+  const state = await openEditor(testContext, { path: 'app.jsx', languageHint: 'javascript', value: 'const view = <div>' });
   const { container, handle } = state;
   // Self-verifying fixture: the paths match the host's own mapping, so this really
   // exercises the JSX dialect rather than a JavaScript grammar under a JSX name.
@@ -680,7 +733,7 @@ test('replayed auto-close trigger keys never rewrite the document in the JSX dia
 });
 
 test('highlighting resumes once the text is back within budget', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', value: asciiBytes(1048577), path: 'size.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: asciiBytes(1048577), path: 'size.ts', languageHint: 'typescript' });
   assert.equal(highlightState(state.container), 'limited');
   requireNote(state.container, 'limited', 'code.highlightLimited');
   await act(async () => { await state.render({ value: TS_SAMPLE }); });
@@ -691,7 +744,7 @@ test('highlighting resumes once the text is back within budget', async testConte
 
 test('a degraded read-only preview still explains why it has no colours', async testContext => {
   const value = asciiBytes(1048577);
-  const state = await openEditor(testContext, { mode: 'preview', canWrite: false, value, path: 'size.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { canWrite: false, value, path: 'size.ts', languageHint: 'typescript' });
   assert.equal(highlightState(state.container), 'limited');
   requireNote(state.container, 'limited', 'code.highlightLimited');
   assert.equal(visibleText(state.container), value, 'a degraded preview must still carry the whole file');
@@ -728,7 +781,7 @@ test('a parser failure while mounting a document degrades instead of breaking th
   let restoreParser = null;
   let state = null;
   try {
-    state = await openEditor(testContext, { mode: 'edit', value: TS_SAMPLE, path: 'fresh.ts', languageHint: 'typescript' }, {
+    state = await openEditor(testContext, { value: TS_SAMPLE, path: 'fresh.ts', languageHint: 'typescript' }, {
       beforeMount: client => { restoreParser = breakParser(client, 'typescript', 'fresh.ts'); },
     });
     assert.ok(restoreParser, 'the parser must have been broken before mounting');
@@ -741,7 +794,7 @@ test('a parser failure while mounting a document degrades instead of breaking th
 });
 
 test('a parser failure while applying new text from props degrades instead of breaking the panel', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
   const restoreParser = breakParser(state.client, 'typescript', 'x.ts');
   try {
     const next = 'const fromProps = 1;\n';
@@ -755,7 +808,7 @@ test('a parser failure while applying new text from props degrades instead of br
 });
 
 test('a parser failure during a transaction degrades instead of breaking the panel', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
   const restoreParser = breakParser(state.client, 'typescript', 'x.ts');
   try {
     // The same `view.dispatch` path a user edit takes, carrying the `userEvent`
@@ -773,7 +826,7 @@ test('a parser failure during a transaction degrades instead of breaking the pan
 });
 
 test('the limited budget withdraws the syntax instead of only relabelling it', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', value: TS_SAMPLE, path: 'size.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: TS_SAMPLE, path: 'size.ts', languageHint: 'typescript' });
   const { container, handle } = state;
   assert.ok(tokenColors(handle, container).size >= 2, 'the fixture must start out genuinely highlighted');
   const oversize = asciiBytes(1048577);
@@ -795,7 +848,7 @@ test('the limited budget stops parsing instead of only hiding the colours', asyn
   let restoreParser = null;
   let state = null;
   try {
-    state = await openEditor(testContext, { mode: 'edit', value: oversize, path: 'x.ts', languageHint: 'typescript' }, {
+    state = await openEditor(testContext, { value: oversize, path: 'x.ts', languageHint: 'typescript' }, {
       beforeMount: client => { restoreParser = breakParser(client, 'typescript', 'x.ts'); },
     });
     assert.equal(highlightState(state.container), 'limited',
@@ -808,7 +861,7 @@ test('the limited budget stops parsing instead of only hiding the colours', asyn
 
 test('the save shortcut follows the platform modifier instead of a hard-coded key', async testContext => {
   // Default (non-mac) environment: Ctrl saves and Meta does not.
-  const pc = await openEditor(testContext, { mode: 'edit' });
+  const pc = await openEditor(testContext, { canWrite: true });
   pc.container.querySelector('.cm-content').dispatchEvent(
     new pc.handle.window.KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
   await flushDom();
@@ -820,7 +873,7 @@ test('the save shortcut follows the platform modifier instead of a hard-coded ke
 
   // macOS environment, applied before the bundle is evaluated so CodeMirror's
   // `Mod` resolves to Cmd.
-  const mac = await openEditor(testContext, { mode: 'edit' }, { platform: 'MacIntel' });
+  const mac = await openEditor(testContext, { canWrite: true }, { platform: 'MacIntel' });
   const metaEvent = new mac.handle.window.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
   mac.container.querySelector('.cm-content').dispatchEvent(metaEvent);
   await flushDom();
@@ -829,7 +882,7 @@ test('the save shortcut follows the platform modifier instead of a hard-coded ke
 });
 
 test('undo and the caret survive within the current document', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit' });
+  const state = await openEditor(testContext, { canWrite: true });
   const { container, handle } = state;
   await setEditorText(container, 'changed text\n');
   assert.deepEqual(state.calls, ['changed text\n'], 'the edit must be reported once');
@@ -849,7 +902,7 @@ test('undo and the caret survive within the current document', async testContext
 });
 
 test('a failure in one document does not mark a healthy document as failed', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', documentId: 'doc-a', value: 'first\n', path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { documentId: 'doc-a', value: 'first\n', path: 'x.ts', languageHint: 'typescript' });
   const restoreParser = breakParser(state.client, 'typescript', 'x.ts');
   try {
     await act(async () => { await state.render({ documentId: 'doc-a', path: 'x.ts', languageHint: 'typescript', value: 'first\nexternal\n' }); });
@@ -870,7 +923,7 @@ test('a failure in one document does not mark a healthy document as failed', asy
 });
 
 test('a late dispatch from the previous document cannot damage the current one', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', documentId: 'doc-a', value: 'first\n', path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { documentId: 'doc-a', value: 'first\n', path: 'x.ts', languageHint: 'typescript' });
   const { container } = state;
   const previousView = editorViewOf(container);
   await act(async () => { await state.render({ documentId: 'doc-b', path: 'y.ts', languageHint: 'typescript', value: 'second\n' }); });
@@ -889,7 +942,7 @@ test('a late dispatch from the previous document cannot damage the current one',
 });
 
 test('a degraded editor keeps taking new text and still reports the edits made in it', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
   const { container, handle } = state;
   const restoreParser = breakParser(state.client, 'typescript', 'x.ts');
   try {
@@ -913,7 +966,7 @@ test('a degraded editor keeps taking new text and still reports the edits made i
 });
 
 test('a degraded preview never reports a change', async testContext => {
-  const state = await openEditor(testContext, { mode: 'preview', canWrite: false, value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { canWrite: false, value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
   const { container, handle } = state;
   const restoreParser = breakParser(state.client, 'typescript', 'x.ts');
   try {
@@ -933,17 +986,22 @@ test('a degraded preview never reports a change', async testContext => {
   }
 });
 
-test('a degraded read-only edit view refuses programmatic input instead of reporting it', async testContext => {
-  const state = await openEditor(testContext, { mode: 'edit', canWrite: false, value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
+test('a degraded non-writable surface suppresses input and save without an editable control', async testContext => {
+  const state = await openEditor(testContext, { canWrite: false, value: TS_SAMPLE, path: 'x.ts', languageHint: 'typescript' });
   const { container, handle } = state;
   const restoreParser = breakParser(state.client, 'typescript', 'x.ts');
   try {
     await act(async () => { await state.render({ value: 'read only text\n' }); });
     assert.equal(highlightState(container), 'error');
-    const fallback = container.querySelector('textarea[data-fm-code-fallback="edit"]');
-    assert.equal(fallback.readOnly, true, 'a non-writable edit view must be read-only, degraded or not');
-    assert.equal(fallback.value, 'read only text\n');
-    await typeIntoFallback(handle, fallback, 'must not be reported\n');
+    const fallback = container.querySelector('pre[data-fm-code-fallback="preview"]');
+    assert.ok(fallback, 'a non-writable fallback must not expose a textarea');
+    assert.equal(container.querySelector('textarea'), null);
+    assert.equal(fallback.textContent, 'read only text\n');
+    fallback.dispatchEvent(new handle.window.Event('input', { bubbles: true }));
+    const save = new handle.window.KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true });
+    fallback.dispatchEvent(save);
+    assert.equal(save.defaultPrevented, true);
+    assert.equal(state.saveCalls, 0);
     assert.deepEqual(state.calls, [], 'a read-only control must not turn programmatic input into a reported change');
   } finally {
     restoreParser();
@@ -953,7 +1011,7 @@ test('a degraded read-only edit view refuses programmatic input instead of repor
 test('the editing surface is keyboard focusable and Ctrl+A selects the whole document', async testContext => {
   const lines = 5000;
   const long = Array.from({ length: lines }, (_, index) => `const value${index} = ${index};`).join('\n') + '\n';
-  const state = await openEditor(testContext, { mode: 'edit', value: long, path: 'big.ts', languageHint: 'typescript' });
+  const state = await openEditor(testContext, { value: long, path: 'big.ts', languageHint: 'typescript' });
   const { container, handle } = state;
   const content = container.querySelector('.cm-content');
   assert.equal(content.getAttribute('contenteditable'), 'true');
@@ -996,7 +1054,7 @@ const HIGHLIGHT_SAMPLES = [
 
 for (const [hint, path, sample] of HIGHLIGHT_SAMPLES) {
   test(`the first batch really highlights ${hint} from ${path}`, async testContext => {
-    const state = await openEditor(testContext, { mode: 'preview', canWrite: false, value: sample, path, languageHint: hint });
+    const state = await openEditor(testContext, { canWrite: false, value: sample, path, languageHint: hint });
     const { container, handle, client } = state;
     const host = container.querySelector('[data-fm-code]');
     assert.ok(host, 'the editor must render its contract container');
@@ -1016,13 +1074,13 @@ for (const [hint, path, sample] of HIGHLIGHT_SAMPLES) {
         `${path} must resolve to the ${expectedDialect} dialect, not the plain ${hint} grammar`);
     }
 
-    // Acceptance 12 covers the editing mode too, and switching mode must keep the
+    // Acceptance 12 covers the writable surface too, and changing write permission must keep the
     // same colours rather than rebuild the editor into plain text.
-    await act(async () => { await state.render({ mode: 'edit', canWrite: true }); });
-    assert.equal(highlightState(container), 'active', `${path} must stay highlighted after switching to edit mode`);
+    await act(async () => { await state.render({ canWrite: true }); });
+    assert.equal(highlightState(container), 'active', `${path} must stay highlighted after enabling write permission`);
     assert.equal(visibleText(container), sample, `editing ${path} must keep the sample verbatim`);
     const editColours = tokenColors(handle, container);
     assert.ok(editColours.size >= 2,
-      `${path} must keep at least two distinct token colours in edit mode, got ${editColours.size}: ${[...editColours].join(', ')}`);
+      `${path} must keep at least two distinct token colours when writable, got ${editColours.size}: ${[...editColours].join(', ')}`);
   });
 }

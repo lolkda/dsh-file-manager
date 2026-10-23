@@ -13,6 +13,17 @@ const directoryPath = (handle: FileHandle): string => `/proc/self/fd/${handle.fd
 const childPath = (handle: FileHandle, name: string | Buffer): Buffer =>
   Buffer.concat([Buffer.from(`${directoryPath(handle)}/`), typeof name === 'string' ? Buffer.from(name) : name]);
 
+/** Share concurrent parent checks, never a completed identity result. */
+function shareVerification(check: () => Promise<void>): () => Promise<void> {
+  let pending: Promise<void> | undefined;
+  return () => {
+    // Clear before consumers resume, on rejection as well as success. A later
+    // batch (or rmdir) must walk the live parent chain again, not trust a cache.
+    pending ??= check().finally(() => { pending = undefined; });
+    return pending;
+  };
+}
+
 export interface DeletionEffect {
   /** The selected name itself was unlinked/rmdir'd, even if a later sync failed. */
   removed: boolean;
@@ -111,11 +122,14 @@ export async function deleteTree({ parent, name, expected, verifyParent, selecte
     try {
       const opened = await directory.stat({ bigint: true });
       if (!opened.isDirectory() || identity(opened) !== identity(before)) fail('PATH_CHANGED', 'A directory was replaced while being opened.', 409);
-      const verify = async (): Promise<void> => {
+      // Sibling leaves share only a check already in progress. Otherwise every
+      // leaf reopens the same root/ancestor chain, multiplying I/O by tree depth.
+      // Each leaf still performs its own final identity/version check below it.
+      const verify = shareVerification(async (): Promise<void> => {
         await verifyParent();
         const named = await fs.lstat(address, { bigint: true });
         if (!named.isDirectory() || identity(named) !== identity(opened)) fail('PATH_CHANGED', 'A directory moved or was replaced during deletion.', 409);
-      };
+      });
       await verify();
       // Keep raw names, including names the UI cannot express and invalid UTF-8.
       // This is one directory's names, not a stat/hash pre-scan of its subtree.

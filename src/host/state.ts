@@ -1,28 +1,13 @@
-import path from 'node:path';
 import { z } from 'zod';
 import Schema from '@deepseek-ai/schemastery';
 import { FileManagerError } from '../contracts/errors.js';
 import {
-  LIMIT_BOUNDS, LIMIT_DEFAULTS, OPERATIONS_STORAGE_NAMESPACE, STORAGE_NAMESPACE,
-  type LimitName, type ProfileLimits,
+  LIMIT_BOUNDS, LIMIT_DEFAULTS, OPERATIONS_STORAGE_NAMESPACE,
+  type LimitName,
 } from '../contracts/limits.js';
 import type { PluginContext, StorageDomainHandle } from './context.js';
-import type { RootDescriptor } from './manager.js';
 import type { TaskRecord } from './tasks.js';
 import type { TransferTask } from './transfers.js';
-
-const rootSchema = z.object({
-  id: z.string().min(1).max(128),
-  provider: z.literal('host-local'),
-  path: z.string().refine(value => path.isAbsolute(value) && !/[\x00-\x1f]/.test(value)),
-  label: z.string(),
-  identity: z.string().regex(/^\d+:\d+$/),
-  createdAt: z.string().datetime(),
-}).strict();
-const rootStateSchema = z.object({
-  revision: z.number().int().nonnegative(),
-  roots: z.array(rootSchema),
-}).strict().refine(state => new Set(state.roots.map(root => root.id)).size === state.roots.length);
 
 /** One config field per frozen limit, described by the limit contract itself. */
 function limitField(name: LimitName) {
@@ -46,47 +31,6 @@ export const LIMITS_CONFIG = Schema.object({
   deletePlanTtlMs: limitField('deletePlanTtlMs'),
   maxVerificationBytes: limitField('maxVerificationBytes'),
 });
-
-export interface ProfileState {
-  managerOptions: {
-    initialRoots: RootDescriptor[];
-    maxTextBytes: number;
-    maxVerificationBytes: number;
-    deletePlanTtlMs: number;
-    persistRoots(roots: RootDescriptor[]): Promise<void>;
-  };
-  close(): Promise<void>;
-}
-
-/**
- * Open profile-owned metadata through DSH, without writing a separate config file.
- *
- * `limits` is the already-resolved configuration the caller owns (from the
- * plugin's Loader `Config`); this adapter never reads configuration itself.
- */
-export async function openProfileState(ctx: PluginContext, limits: ProfileLimits): Promise<ProfileState> {
-  const domain = await ctx.storageDomain.open({
-    name: STORAGE_NAMESPACE,
-    version: 1,
-    layout: 'per-record',
-    global: { schema: rootStateSchema, initial: { revision: 0, roots: [] } },
-    tables: {},
-  });
-  const stored = domain.global.get() as { roots: RootDescriptor[] };
-  return {
-    managerOptions: {
-      initialRoots: stored.roots,
-      maxTextBytes: limits.maxTextBytes,
-      maxVerificationBytes: limits.maxVerificationBytes,
-      deletePlanTtlMs: limits.deletePlanTtlMs,
-      async persistRoots(roots: RootDescriptor[]) {
-        const current = domain.global.get() as { revision: number };
-        await domain.global.set({ revision: current.revision + 1, roots });
-      },
-    },
-    close: () => domain.close(),
-  };
-}
 
 const statusSchema = z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled', 'interrupted']);
 const historyFields = {

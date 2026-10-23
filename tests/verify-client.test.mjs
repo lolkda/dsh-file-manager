@@ -28,20 +28,26 @@ const FILE = { name: 'normal.txt', path: 'normal.txt', kind: 'file', size: 5, mo
 const FOLDER = { name: 'folder', path: 'folder', kind: 'directory', size: 0, modifiedAt: '2026-01-01T00:00:00.000Z', version: '1:2:3:4:5', mode: 493 };
 
 const capabilitiesOf = (overrides = {}) => ({ write: true, tasks: true, taskHistory: true, watch: true, upload: true, references: true, ...overrides });
-const bootstrapOf = ({ degraded = null, capabilities = capabilitiesOf() } = {}) => ({ ok: true, value: {
-  roots: [{ id: 'root-1', path: '/tmp/root', name: 'root' }], workspaces: [], version: 1, stage: 'basic-management', limits: {}, capabilities, degraded,
+const bootstrapOf = ({ degraded = null, capabilities = capabilitiesOf(), root = { id: 'root-1', path: '/tmp/root', label: 'root', identity: '1:2' } } = {}) => ({ ok: true, value: {
+  root, version: 1, stage: 'basic-management', limits: {}, capabilities, degraded,
 } });
 const listingOf = ({ entries = [FILE, FOLDER], unaddressable = [], nextCursor = null } = {}) => ({ ok: true, value: {
   rootId: 'root-1', path: '', total: entries.length, nextCursor, entries, unaddressable,
 } });
 
 /** A stub Host: every answer is explicit, so a missing expectation is a test defect. */
-function hostStub({ bootstrap = bootstrapOf(), listing = listingOf(), tasks = { ok: true, value: { items: [], revision: 0 } }, onRequest } = {}) {
+// `tasks.list` and `transfers.list` answer with an array, exactly as the frozen
+// contract declares them (TasksListResultSchema = z.array(...)).
+function hostStub({ bootstrap = bootstrapOf(), listing = listingOf(), tasks = { ok: true, value: [] }, onRequest } = {}) {
   return ({ url, body }) => {
     if (onRequest) { const override = onRequest({ url, body }); if (override) return override; }
     if (body?.op === 'bootstrap') return { body: bootstrap };
+    // There is no location surface left to refresh: the one root arrives with
+    // bootstrap, so a client asking about grants would be a defect, not a version
+    // difference.
     if (body?.op === 'entries.list') return { body: typeof listing === 'function' ? listing(body) : listing };
     if (body?.op === 'tasks.list') return { body: tasks };
+    if (body?.op === 'transfers.list') return { body: { ok: true, value: [] } };
     if (url.includes('/v2/events')) return { status: 200, body: '', headers: { 'content-type': 'text/event-stream' } };
     return { body: { ok: true, value: {} } };
   };

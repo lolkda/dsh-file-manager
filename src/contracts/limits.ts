@@ -18,9 +18,11 @@ import { fail } from './errors.js';
  * carry — not a namespace registered at runtime.
  */
 export const SETTINGS_NAMESPACE = 'local-file-manager' as const;
-/** Profile storage unit for root grants. Storage units must match /^[a-z][a-z0-9_]*$/. */
-export const STORAGE_NAMESPACE = 'local_file_manager' as const;
-/** Profile storage unit for operation journals (tasks and transfers). */
+/**
+ * Profile storage unit for operation journals (tasks and transfers). It is the
+ * only storage unit this plugin opens: the browsable root is fixed at `/` and is
+ * never persisted, so no root-grant storage is read, migrated or cleaned up.
+ */
 export const OPERATIONS_STORAGE_NAMESPACE = 'local_file_manager_operations' as const;
 /** Bootstrap stage label reported on the wire. */
 export const WIRE_STAGE = 'basic-management' as const;

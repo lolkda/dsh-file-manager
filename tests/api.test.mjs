@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -21,32 +21,38 @@ function request(payload) {
   });
 }
 
-test('control bootstrap provides roots and workspace candidates without any Session', async () => {
+test('control bootstrap reports the single root without any Session', async t => {
   const { createControlHandler } = await plugin();
-  const handler = createControlHandler({ manager: createManager(), workspaces: () => [{ id: 'w1', path: '/candidate', title: 'Workspace' }] });
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-api-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = createManager({ rootPath: root });
+  t.after(() => manager.close());
+  const handler = createControlHandler({ manager });
   const response = await handler(request({ op: 'bootstrap' }));
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.ok, true);
-  assert.deepEqual(body.value.roots, []);
-  assert.deepEqual(body.value.workspaces, [{ id: 'w1', path: '/candidate', title: 'Workspace' }]);
+  assert.equal(body.value.root.path, root);
+  assert.equal(body.value.root.id, manager.getRoot().id);
+  assert.equal('roots' in body.value, false);
+  assert.equal('workspaces' in body.value, false);
 });
 
-test('control route adds a grant then lists its real filesystem contents', async t => {
+test('control route lists the real filesystem contents of the fixed root', async t => {
   const { createControlHandler } = await plugin();
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-api-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'example.txt'), 'hello');
-  const handler = createControlHandler({ manager: createManager(), workspaces: () => [] });
-  const added = await (await handler(request({ op: 'roots.add', path: root }))).json();
-  assert.equal(added.ok, true);
-  const listing = await (await handler(request({ op: 'entries.list', rootId: added.value.id, path: '' }))).json();
+  const manager = createManager({ rootPath: root });
+  t.after(() => manager.close());
+  const handler = createControlHandler({ manager });
+  const listing = await (await handler(request({ op: 'entries.list', rootId: manager.getRoot().id, path: '' }))).json();
   assert.deepEqual(listing.value.entries.map(entry => entry.name), ['example.txt']);
 });
 
 test('invalid control payloads return a bounded business failure rather than an exception', async () => {
   const { createControlHandler } = await plugin();
-  const handler = createControlHandler({ manager: createManager(), workspaces: () => [] });
+  const handler = createControlHandler({ manager: createManager() });
   for (const payload of [null, [], {}, { op: 'unknown' }]) {
     const response = await handler(request(payload));
     assert.equal(response.status, 400);
@@ -59,7 +65,7 @@ test('invalid control payloads return a bounded business failure rather than an 
 
 test('root-scope errors retain their stable code and HTTP status', async () => {
   const { createControlHandler } = await plugin();
-  const handler = createControlHandler({ manager: createManager(), workspaces: () => [] });
+  const handler = createControlHandler({ manager: createManager() });
   const response = await handler(request({ op: 'entries.list', rootId: 'ungranted', path: '' }));
   assert.equal(response.status, 404);
   const body = await response.json();
@@ -100,4 +106,68 @@ test('Host plugin mounts exact authenticated Fetch routes and contributes no Age
   assert.equal((await routes[0].fetch(request({ op: 'bootstrap' }))).status, 200);
   for (const dispose of disposers.reverse()) await dispose?.();
   assert.deepEqual(routes, []);
+});
+
+
+/* ------------------------------------------------------------------ *
+ * The removed directory locations over the authenticated control route
+ *
+ * The browser no longer manages locations, so the wire must not keep a
+ * back door: every retired `roots.*` operation is an unknown operation, and the
+ * one root the Host opened stays the only addressable one.
+ * ------------------------------------------------------------------ */
+
+test('every retired directory-location operation is refused as an unknown operation', async t => {
+  const { createControlHandler } = await plugin();
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-removed-roots-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = createManager({ rootPath: root });
+  t.after(() => manager.close());
+  const grant = manager.getRoot();
+  const handler = createControlHandler({ manager });
+  const retired = [
+    { op: 'roots.list' },
+    { op: 'roots.status' },
+    { op: 'roots.add', path: root, requestId: 'retired-roots-add-request' },
+    { op: 'roots.remove', rootId: grant.id, requestId: 'retired-roots-remove-request' },
+    { op: 'roots.reauthorize', rootId: grant.id, expectedIdentity: grant.identity, confirmed: true, requestId: 'retired-roots-reauthorize-request' },
+  ];
+  for (const payload of retired) {
+    const response = await handler(request(payload));
+    assert.equal(response.status, 400, JSON.stringify(payload));
+    const body = await response.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.error.code, 'INVALID_REQUEST');
+  }
+  // A refused request never touches the root, and no storage of locations exists.
+  assert.equal(manager.getRoot().id, grant.id);
+  const listing = await (await handler(request({ op: 'entries.list', rootId: grant.id, path: '' }))).json();
+  assert.deepEqual(listing.value.entries, []);
+});
+
+test('an id from any other process or directory is refused with ROOT_NOT_FOUND', async t => {
+  const { createControlHandler } = await plugin();
+  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-foreign-root-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, 'root');
+  const other = path.join(base, 'other');
+  await mkdir(root); await mkdir(other);
+  await writeFile(path.join(root, 'example.txt'), 'hello');
+  const manager = createManager({ rootPath: root });
+  const elsewhere = createManager({ rootPath: other });
+  t.after(async () => { await manager.close(); await elsewhere.close(); });
+  const handler = createControlHandler({ manager });
+  const foreign = ['ungranted', elsewhere.getRoot().id, `${manager.getRoot().id}-stale`];
+  for (const rootId of foreign) {
+    const response = await handler(request({ op: 'entries.list', rootId, path: '' }));
+    assert.equal(response.status, 404, rootId);
+    assert.equal((await response.json()).error.code, 'ROOT_NOT_FOUND');
+  }
+  const text = await handler(request({ op: 'text.read', rootId: `${manager.getRoot().id}-stale`, path: 'example.txt' }));
+  assert.equal(text.status, 404);
+  assert.equal((await text.json()).error.code, 'ROOT_NOT_FOUND');
+  const written = await handler(request({ op: 'entries.create-file', rootId: 'ungranted', path: 'new.txt', requestId: 'foreign-root-write-request' }));
+  assert.equal(written.status, 404);
+  assert.equal((await written.json()).error.code, 'ROOT_NOT_FOUND');
+  assert.deepEqual((await readdir(root)).sort(), ['example.txt'], 'a refused id must never create anything');
 });

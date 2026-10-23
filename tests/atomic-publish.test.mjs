@@ -7,8 +7,8 @@ import { createManager } from '../dist/host/manager.js';
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-atomic-'));
-  const managers = [createManager(), createManager()];
-  const grants = await Promise.all(managers.map(manager => manager.addRoot({ path: root })));
+  const managers = [createManager({ rootPath: root }), createManager({ rootPath: root })];
+  const grants = managers.map(manager => manager.getRoot());
   t.after(async () => { await Promise.all(managers.map(manager => manager.close())); await rm(root, { recursive: true, force: true }); });
   return { root, managers, ref: (index, relative) => ({ rootId: grants[index].id, path: relative }) };
 }

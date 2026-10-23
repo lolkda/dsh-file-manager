@@ -66,7 +66,7 @@ test('R17: an unavailable operation journal degrades to read-only and keeps hist
   assert.equal(bootstrap.value.capabilities.write, false, 'degraded operations means read-only');
   assert.equal(bootstrap.value.capabilities.tasks, false);
   assert.equal(bootstrap.value.capabilities.taskHistory, false);
-  assert.ok(bootstrap.value.roots.length > 0, 'trustworthy root grants stay visible while the journal is unavailable');
+  assert.equal(bootstrap.value.root.id, fixture.rootId, 'the one browsing root stays addressable while the journal is unavailable');
 
   const listing = await fixture.call('entries.list', fixture.ref(''));
   assert.equal(listing.status, 200, 'browsing must keep working');
@@ -75,8 +75,6 @@ test('R17: an unavailable operation journal degrades to read-only and keeps hist
   assert.equal(read.value.text, 'readable');
 
   for (const [op, payload] of [
-    ['roots.add', { path: fixture.directory }],
-    ['roots.remove', { rootId: fixture.rootId }],
     ['entries.create-file', { ...fixture.ref('new.txt') }],
     ['entries.create-directory', { ...fixture.ref('newdir') }],
     ['entries.rename', { ...fixture.ref('note.txt'), name: 'renamed.txt' }],
@@ -117,27 +115,27 @@ test('R17: corrupted raw records are preserved, never reset or rewritten', { ski
   assert.equal(JSON.stringify([...stub.state.tables.get('tasks').entries()]), before, 'raw record bytes must be identical after opening');
 });
 
-test('R17: untrustworthy root grants refuse file access without discarding the grant', { skip: blocked }, async t => {
-  const degraded = { scope: 'roots', code: 'INITIALIZATION_FAILED', message: 'Stored root grants are not trustworthy.', readOnly: false };
+test('R17: an unopenable root refuses file access and reports the filesystem scope', { skip: blocked }, async t => {
+  const degraded = { scope: 'filesystem', code: 'ROOT_UNAVAILABLE', message: 'The browsing root could not be opened.', readOnly: false };
   const fixture = await hostFixture({ degraded });
   t.after(fixture.close);
   writeFileSync(path.join(fixture.directory, 'note.txt'), 'present');
 
   const bootstrap = await fixture.call('bootstrap');
-  record(evidence, 'degradation-roots', `bootstrap=${bootstrap.status} roots=${bootstrap.value?.roots?.length} degraded=${JSON.stringify(bootstrap.value?.degraded)}`);
+  record(evidence, 'degradation-filesystem', `bootstrap=${bootstrap.status} root=${JSON.stringify(bootstrap.value?.root)} degraded=${JSON.stringify(bootstrap.value?.degraded)}`);
   assert.equal(bootstrap.status, 200);
-  assert.equal(bootstrap.value.degraded.scope, 'roots');
+  assert.equal(bootstrap.value.degraded.scope, 'filesystem');
   assert.equal(bootstrap.value.degraded.readOnly, false);
-  assert.deepEqual(bootstrap.value.roots, [], 'untrustworthy grants must not be offered as usable roots');
+  assert.equal(bootstrap.value.root, null, 'an unopenable root is not offered as a browsable location');
   assert.equal(bootstrap.value.capabilities.write, false);
+  assert.equal(bootstrap.value.capabilities.references, false);
 
-  for (const [op, payload] of [['entries.list', fixture.ref('')], ['text.read', fixture.ref('note.txt')], ['bootstrap', {}]]) {
+  for (const [op, payload] of [['entries.list', fixture.ref('')], ['text.read', fixture.ref('note.txt')]]) {
     const refused = await fixture.call(op, payload);
-    if (op === 'bootstrap') continue;
-    record(evidence, 'degradation-roots', `${op} -> ${refused.status} ${refused.error?.code} scope=${refused.error?.details?.scope}`);
-    assert.equal(refused.status, 503, `${op} must be refused when the grants are untrustworthy`);
+    record(evidence, 'degradation-filesystem', `${op} -> ${refused.status} ${refused.error?.code} scope=${refused.error?.details?.scope}`);
+    assert.equal(refused.status, 503, `${op} must be refused when the root is unusable`);
     assert.equal(refused.error.code, 'FILE_MANAGER_UNAVAILABLE');
-    assert.equal(refused.error.details.scope, 'roots');
+    assert.equal(refused.error.details.scope, 'filesystem');
   }
   assert.equal(readFileSync(path.join(fixture.directory, 'note.txt'), 'utf8'), 'present', 'a refused read must not modify anything');
 });
@@ -297,8 +295,11 @@ test('R19: download stays an authenticated GET with a streamed response', { skip
     assert.equal(response.status, 200, JSON.stringify(parsed));
     return parsed.value;
   };
-  const grant = await control({ op: 'roots.add', path: files });
-  const begun = await control({ op: 'transfers.begin', direction: 'download', rootId: grant.id, path: '报告.txt' });
+  // The plugin browses `/`, so the fixture's isolated file is addressed relative
+  // to the one root bootstrap reports: the bytes never leave `base`.
+  const booted = await control({ op: 'bootstrap' });
+  assert.equal(booted.root.path, '/');
+  const begun = await control({ op: 'transfers.begin', direction: 'download', rootId: booted.root.id, path: path.relative('/', path.join(files, '报告.txt')) });
   const downloadUrl = `/api/file-manager/v2/download?taskId=${begun.id}`;
 
   // 1. An authenticated GET streams the exact bytes.

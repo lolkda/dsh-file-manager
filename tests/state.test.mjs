@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -10,61 +10,14 @@ async function stateModule() {
   let module;
   try { module = await import('../dist/host/state.js'); }
   catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND' || error.url !== new URL('../dist/host/state.js', import.meta.url).href) throw error; }
-  assert.equal(typeof module?.openProfileState, 'function', 'the profile storage adapter is missing');
+  assert.equal(typeof module?.openOperationState, 'function', 'the operation journal adapter is missing');
   return module;
 }
 
-// Adapter unit tests use an in-memory service boundary; they do not prove the
-// deployed backend's naming or disk contract. runtime-storage.test.mjs does that.
-// The adapter takes the already-resolved limits, so no settings service is faked:
-// DSH 0.1.7-rc.1 has no runtime namespace registration to fake.
-function profile() {
-  const records = new Map();
-  let closeCount = 0;
-  let lastSpec;
-  return {
-    get closeCount() { return closeCount; },
-    get spec() { return lastSpec; },
-    ctx: {
-      storageDomain: {
-        async open(spec) {
-          lastSpec = spec;
-          if (!records.has(spec.name)) records.set(spec.name, structuredClone(spec.global.initial));
-          spec.global.schema.parse(records.get(spec.name));
-          return {
-            global: {
-              get: () => structuredClone(records.get(spec.name)),
-              async set(value) { records.set(spec.name, spec.global.schema.parse(value)); },
-            },
-            async close() { closeCount++; },
-          };
-        },
-      },
-    },
-  };
-}
-
-test('profile storage restores explicit grants after the Host adapter is reopened', async t => {
-  const { openProfileState } = await stateModule();
-  const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-domain-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const fixture = profile();
-  const limits = resolveLimits();
-  const first = await openProfileState(fixture.ctx, limits);
-  const manager = createManager(first.managerOptions);
-  const grant = await manager.addRoot({ path: root });
-  await first.close();
-  const reopened = await openProfileState(fixture.ctx, limits);
-  const restored = createManager(reopened.managerOptions);
-  assert.equal(restored.listRoots()[0].id, grant.id);
-  await restored.removeRoot({ rootId: grant.id });
-  await reopened.close();
-  const third = await openProfileState(fixture.ctx, limits);
-  assert.deepEqual(createManager(third.managerOptions).listRoots(), []);
-  await third.close();
-  assert.equal(fixture.closeCount, 3);
-});
-
+// The profile adapter that owned the root-grant store is retired: the browsing
+// root is opened by the manager itself and nothing about it is durable. These
+// unit tests use an in-memory journal boundary; they do not prove the deployed
+// backend's naming or disk contract. runtime-storage.test.mjs does that.
 function journalProfile() {
   const tables = new Map();
   let failNext = false;
@@ -143,23 +96,50 @@ test('journal writes capture an immutable request-time checkpoint snapshot', asy
   await reopened.close();
 });
 
-test('the resolved profile limits reach the manager options', async () => {
-  const { openProfileState } = await stateModule();
-  const fixture = profile();
-  const limits = resolveLimits({ maxTextBytes: 4096, maxVerificationBytes: 8192, deletePlanTtlMs: 60000 });
-  const state = await openProfileState(fixture.ctx, limits);
-  assert.equal(state.managerOptions.maxTextBytes, 4096);
-  assert.equal(state.managerOptions.maxVerificationBytes, 8192);
-  assert.equal(state.managerOptions.deletePlanTtlMs, 60000);
-  assert.equal(limits.transferConcurrency, LIMIT_DEFAULTS.transferConcurrency, 'unset limits keep their contract defaults');
-  await state.close();
+test('the root-grant storage adapter is retired, not merely unused', async () => {
+  const module = await stateModule();
+  assert.equal('openProfileState' in module, false, 'the profile storage adapter must be gone');
+  assert.equal('ProfileState' in module, false, 'its contract type must be gone too');
 });
 
-test('profile schema rejects corrupt grants instead of quietly treating them as empty', async () => {
-  const { openProfileState } = await stateModule();
-  const fixture = profile();
-  const state = await openProfileState(fixture.ctx, resolveLimits());
-  const invalid = { revision: 1, roots: [{ id: 'root', provider: 'ssh', path: '/same-spelling', identity: '1:2', label: 'not-local', createdAt: new Date().toISOString() }] };
-  assert.equal(fixture.spec.global.schema.safeParse(invalid).success, false);
-  await state.close();
+test('a manager needs no storage service: the root is opened, not restored', async () => {
+  // `createManager` takes no plugin context at all. Nothing about the root can
+  // be read back from disk, so a fresh process always opens the directory it is
+  // configured with and never inherits another process's locations.
+  assert.equal(createManager.length <= 1, true, 'the manager factory takes only its own options');
+  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-no-root-store-'));
+  const manager = createManager({ rootPath: base });
+  try {
+    const root = manager.getRoot();
+    assert.match(root.id, /^[0-9a-f]{32}$/);
+    assert.equal(root.path, base);
+    assert.deepEqual(await manager.list({ rootId: root.id, path: '' }), {
+      rootId: root.id, path: '', entries: [], unaddressable: [], total: 0, nextCursor: null,
+    });
+  } finally {
+    await manager.close();
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('the resolved profile limits are the caller\'s to carry into the manager', async () => {
+  const limits = resolveLimits({ maxTextBytes: 4096, maxVerificationBytes: 8192, deletePlanTtlMs: 60000 });
+  assert.equal(limits.maxTextBytes, 4096);
+  assert.equal(limits.maxVerificationBytes, 8192);
+  assert.equal(limits.deletePlanTtlMs, 60000);
+  assert.equal(limits.transferConcurrency, LIMIT_DEFAULTS.transferConcurrency, 'unset limits keep their contract defaults');
+  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-limited-'));
+  const manager = createManager({
+    rootPath: base, maxTextBytes: limits.maxTextBytes, maxVerificationBytes: limits.maxVerificationBytes, deletePlanTtlMs: limits.deletePlanTtlMs,
+  });
+  try {
+    await writeFile(path.join(base, 'small.txt'), 'ok');
+    await writeFile(path.join(base, 'large.txt'), 'x'.repeat(limits.maxTextBytes + 1));
+    assert.equal((await manager.readText({ rootId: manager.getRoot().id, path: 'small.txt' })).text, 'ok');
+    await assert.rejects(manager.readText({ rootId: manager.getRoot().id, path: 'large.txt' }),
+      { code: 'TOO_LARGE' }, 'the resolved limits really reach the manager');
+  } finally {
+    await manager.close();
+    await rm(base, { recursive: true, force: true });
+  }
 });

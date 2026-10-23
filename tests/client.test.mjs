@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { access, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { act, editorContainers, editorCount, editorEdit, editorProps, loadClient, node, nodes, setup, textOf, uiBoundary, React, TestRenderer, snapshotBoundary } from './client-harness.mjs';
+import { act, clickRootCrumb, editorContainers, editorCount, editorEdit, editorProps, loadClient, node, nodes, setup, textOf, uiBoundary, React, TestRenderer, snapshotBoundary } from './client-harness.mjs';
 import { loadClientModule } from './client-module-loader.mjs';
 
 // ABI/component tests use React's official renderer and the real Host handlers.
 // They are not visual previews or substitutes for installed Web UI verification.
 test('Client contributes an additive sidebar icon and independent main panel', async t => {
-  const client = await loadClient(async () => new Response(JSON.stringify({ ok: true, value: { roots: [], workspaces: [] } })));
+  const client = await loadClient(async () => new Response(JSON.stringify({ ok: true, value: { root: null } })));
   t.after(client.dispose);
   assert.ok(client.cells.has('sidebar.panellist:file-manager'));
   assert.ok(client.cells.has('main:file-manager'));
@@ -58,45 +58,29 @@ for (const action of ['new-file', 'new-directory', 'rename']) {
   });
 }
 
-test('the add-directory input defaults to slash without a workspace candidate', async t => {
+test('the panel offers no directory-location surface at all', async t => {
   const view = await setup(t);
-  assert.equal(node(view.renderer, { 'data-fm-add-path': true }).props.value, '/');
-  assert.equal(view.manager.listRoots().length, 1, 'a default input must not automatically grant filesystem access');
+  for (const props of [
+    { 'data-fm-add-path': true }, { 'data-fm-add-root': true }, { 'data-fm-root': true },
+    { 'data-fm-action': 'locations' }, { 'data-fm-action': 'empty-locations' }, { 'data-fm-action': 'close-roots' },
+    { 'data-fm-action': 'remove-root-confirm' }, { 'data-fm-action': 'remove-root-cancel' },
+    { 'data-fm-overlay': 'roots' }, { 'data-fm-remove-root-preview': true },
+  ]) {
+    assert.deepEqual(nodes(view.renderer, props), [], `${JSON.stringify(props)} must not exist any more`);
+  }
+  assert.deepEqual(view.requests.filter(item => item.init?.body && String(JSON.parse(item.init.body).op).startsWith('roots.')), [],
+    'the panel must never ask the Host to manage locations');
 });
 
-test('bootstrap leaves slash as the default while still listing workspace candidates', async t => {
-  const view = await setup(t, { controlOptions: { workspaces: () => [{ id: 'workspace-a', path: '/workspace/specific/project', title: 'Project' }] } });
-  assert.equal(node(view.renderer, { 'data-fm-add-path': true }).props.value, '/');
-  assert.equal(nodes(view.renderer, { value: '/workspace/specific/project' }).filter(item => item.type === 'option').length, 1);
-});
-
-test('a delayed bootstrap cannot overwrite an already entered directory path', async t => {
-  let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  t.after(() => release());
-  const view = await setup(t, {
-    settleInitial: false,
-    controlOptions: { workspaces: () => [{ id: 'workspace-a', path: '/workspace/specific/project', title: 'Project' }] },
-    intercept: async (url, init, route) => {
-      const response = await route(url, init);
-      if (init.body && JSON.parse(init.body).op === 'bootstrap') await gate;
-      return response;
-    },
-  });
-  act(() => node(view.renderer, { 'data-fm-add-path': true }).props.onChange({ target: { value: '/chosen/by/user' } }));
-  await act(async () => { release(); while (view.pending.size) await Promise.all([...view.pending]); });
-  assert.equal(node(view.renderer, { 'data-fm-add-path': true }).props.value, '/chosen/by/user');
-});
-
-test('the directory form adds an explicit root without changing existing grants', async t => {
+test('the first listing is the single root bootstrap reported', async t => {
   const view = await setup(t);
-  act(() => node(view.renderer, { 'data-fm-add-path': true }).props.onChange({ target: { value: path.join(view.root, 'folder') } }));
-  await act(async () => {
-    await node(view.renderer, { 'data-fm-add-root': true }).props.onSubmit({ preventDefault() {} });
-    while (view.pending.size) await Promise.all([...view.pending]);
-  });
-  assert.equal((await view.manager.listRoots()).length, 2);
-  assert.equal(nodes(view.renderer, { 'data-fm-root': true }).length, 2);
+  const { rootId, path: current } = view.runtime.location;
+  assert.equal(rootId, view.manager.getRoot().id, 'the browsing scope comes from bootstrap, not from a stored location');
+  assert.equal(current, '', 'the panel opens at the root itself');
+  const listings = view.requests.filter(item => item.init?.body && JSON.parse(item.init.body).op === 'entries.list');
+  assert.ok(listings.length > 0, 'the panel lists its root without being asked to add one');
+  assert.equal(JSON.parse(listings[0].init.body).rootId, rootId);
+  assert.equal(JSON.parse(listings[0].init.body).path, '');
 });
 
 test('all text snapshots use the control POST rather than the unsupported text GET route', async t => {
@@ -105,7 +89,7 @@ test('all text snapshots use the control POST rather than the unsupported text G
   assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/v2/text') && item.init.method === 'GET'), false);
   assert.ok(view.requests.some(item => item.url === '/api/file-manager/v2/control' && JSON.parse(item.init.body).op === 'text.read'));
   assert.equal(editorProps(view.renderer)?.value, '<script>not executable</script>\n你好');
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, 'verified after save');
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'verified after save');
@@ -116,7 +100,7 @@ test('all text snapshots use the control POST rather than the unsupported text G
 test('editing and saving through the text route preserves UTF-8 BOM and CRLF', async t => {
   const view = await setup(t, { seed: root => writeFile(path.join(root, 'folder/hello.txt'), '\ufeff第一行\r\n第二行\r\n') });
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, '已修改\n第二行\n');
   await view.click({ 'data-fm-action': 'save' });
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '\ufeff已修改\r\n第二行\r\n');
@@ -132,7 +116,7 @@ test('editing and saving through the text route preserves UTF-8 BOM and CRLF', a
 test('an unsaved draft survives unmounting and remounting the standalone main panel', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, '面板切换保留');
   view.unmount();
   await view.mount();
@@ -144,7 +128,7 @@ test('an unsaved draft survives unmounting and remounting the standalone main pa
 test('a save conflict exposes disk and local text without overwriting either', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, '本地草稿');
   await writeFile(path.join(view.root, 'folder/hello.txt'), '外部写入');
   await view.click({ 'data-fm-action': 'save' });
@@ -161,7 +145,7 @@ test('a save conflict exposes disk and local text without overwriting either', a
 test('manual refresh flags external changes without replacing a dirty editor', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, 'keep draft');
   await writeFile(path.join(view.root, 'folder/hello.txt'), 'external');
   await view.click({ 'data-fm-action': 'refresh' });
@@ -172,13 +156,13 @@ test('manual refresh flags external changes without replacing a dirty editor', a
 test('closing a dirty editor supports cancel and explicit discard without a disk write', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, 'do not lose silently');
-  await view.click({ 'data-fm-action': 'close-document' });
+  await view.click({ 'data-fm-action': 'close-document', 'data-fm-close-document': 'document-1' });
   assert.equal(view.renderer.root.findAllByType(uiBoundary.Modal).some(modal => modal.props.open), true);
   await view.click({ 'data-fm-action': 'close-cancel' });
   assert.equal(editorProps(view.renderer)?.value, 'do not lose silently');
-  await view.click({ 'data-fm-action': 'close-document' });
+  await view.click({ 'data-fm-action': 'close-document', 'data-fm-close-document': 'document-1' });
   await view.click({ 'data-fm-action': 'close-discard' });
   assert.equal(editorCount(view.renderer), 0);
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '<script>not executable</script>\n你好');
@@ -187,9 +171,9 @@ test('closing a dirty editor supports cancel and explicit discard without a disk
 test('saving from the close prompt closes only after the exact snapshot is verified', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, 'save before close');
-  await view.click({ 'data-fm-action': 'close-document' });
+  await view.click({ 'data-fm-action': 'close-document', 'data-fm-close-document': 'document-1' });
   await view.click({ 'data-fm-action': 'close-save' });
   assert.equal(editorCount(view.renderer), 0);
   assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'save before close');
@@ -205,17 +189,65 @@ test('typing while a save is in flight remains dirty after its receipt arrives',
     if (url === '/api/file-manager/v2/text' && init.method === 'POST' && JSON.parse(init.body).op === 'save') { started(); await gate; }
     return response;
   } });
+  t.after(release);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, 'submitted');
-  let save;
-  await act(async () => { save = node(view.renderer, { 'data-fm-action': 'save' }).props.onClick(); await saving; });
+  await act(async () => { node(view.renderer, { 'data-fm-action': 'save' }).props.onClick(); await saving; });
+  assert.equal(editorProps(view.renderer).canWrite, true, 'in-flight saving must not disable typing');
+  assert.equal(node(view.renderer, { 'data-fm-action': 'close-document', 'data-fm-close-document': 'document-1' }).props.disabled, true,
+    'the saving document must not be closable through its tab X');
+  assert.equal('disabled' in node(view.renderer, { 'data-fm-action': 'close-viewer' }).props, false,
+    'the window close stays enabled while a save is in flight');
+  // Hiding during the save is a real user action: the editor unmounts nothing,
+  // the save keeps running, and re-entry shows the newer draft untouched.
   editorEdit(view, 'newer typing');
-  await act(async () => { release(); await save; });
+  // The hide click returns void, so the gate — not the handler promise — decides
+  // when the in-flight save completes; release it here and drain deterministically.
+  await act(async () => { node(view.renderer, { 'data-fm-action': 'close-viewer' }).props.onClick(); release(); });
   await view.flush();
-  assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'submitted');
-  assert.equal(editorProps(view.renderer)?.value, 'newer typing');
+  assert.equal(node(view.renderer, { 'data-fm-overlay': 'viewer' }).props.hidden, true,
+    'the viewer stayed hidden through the completed save');
+  assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'submitted', 'the in-flight save committed its own snapshot');
+  const documents = view.client.cells.get('main:file-manager').options.inject().documents;
+  assert.equal(documents.getSnapshot().documents.length, 1, 'hiding did not close the saving document');
+  await view.click({ 'data-fm-action': 'open-documents' });
+  assert.equal(node(view.renderer, { 'data-fm-overlay': 'viewer' }).props.hidden, false);
+  assert.equal(editorProps(view.renderer)?.value, 'newer typing', 'the newer draft survived the save and the hide');
   assert.equal(nodes(view.renderer, { 'data-fm-document-state': 'dirty' }).length, 1);
+});
+
+test('a failed save-and-close keeps the prompt, the document and its draft', async t => {
+  const view = await setup(t, { intercept: async (url, init, route) => {
+    if (url === '/api/file-manager/v2/text' && init.method === 'POST' && JSON.parse(init.body).op === 'save') {
+      // Answer the save itself before any routing: a routed save would already
+      // have committed to disk, which would fake the failure being tested.
+      return Response.json({ ok: false, error: { code: 'IO_ERROR', message: 'disk unavailable' } }, { status: 500 });
+    }
+    return route(url, init);
+  } });
+  await view.openHello();
+
+  editorEdit(view, 'draft survives failure');
+  // The failure is driven through the dirty close prompt itself, so the
+  // save-and-close path — not a plain save button press — is what fails.
+  await view.click({ 'data-fm-action': 'close-document', 'data-fm-close-document': 'document-1' });
+  assert.equal(view.renderer.root.findAllByType(uiBoundary.Modal).some(modal => modal.props.open), true);
+  await view.click({ 'data-fm-action': 'close-save' });
+  await view.flush();
+  assert.equal(view.renderer.root.findAllByType(uiBoundary.Modal).some(modal => modal.props.open), true,
+    'a failed save-and-close must not dismiss the close prompt silently');
+  assert.equal(editorProps(view.renderer)?.value, 'draft survives failure');
+  assert.equal(nodes(view.renderer, { 'data-fm-document-state': 'dirty' }).length, 1, 'the failed save keeps the editor dirty');
+  assert.equal(view.client.cells.get('main:file-manager').options.inject().documents.getSnapshot().documents.length, 1,
+    'a failed save never closes or removes the document');
+  assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '<script>not executable</script>\n你好',
+    'the failed save-and-close never writes to disk');
+  // The user can still cancel out of the prompt with the draft intact.
+  await view.click({ 'data-fm-action': 'close-cancel' });
+  assert.equal(editorProps(view.renderer)?.value, 'draft survives failure');
+  assert.equal(nodes(view.renderer, { 'data-fm-document-state': 'dirty' }).length, 1);
+  assert.equal(view.client.cells.get('main:file-manager').options.inject().documents.getSnapshot().documents.length, 1);
 });
 
 test('a Host without the write capability cannot expose active mutation controls', async t => {
@@ -229,8 +261,10 @@ test('a Host without the write capability cannot expose active mutation controls
     return response;
   } });
   await view.openHello();
-  const edit = nodes(view.renderer, { 'data-fm-action': 'edit' });
-  assert.ok(edit.length === 0 || edit[0].props.disabled);
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'edit' }).length, 0);
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'save' }).length, 0);
+  assert.equal(editorProps(view.renderer)?.canWrite, false);
+  await act(async () => { editorProps(view.renderer).onSave(); await view.settle(); });
   assert.equal(view.requests.some(item => item.init.method === 'POST' && item.url === '/api/file-manager/v2/text'), false);
   assert.equal(view.requests.some(item => item.url.startsWith('/api/file-manager/v2/text')), false, 'old read-only Hosts have only the control route');
   assert.equal(editorProps(view.renderer)?.value, '<script>not executable</script>\n你好');
@@ -262,7 +296,7 @@ test('new directory creation refuses to replace an existing name', async t => {
 test('renaming a selected edited file relocates its unsaved draft', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, '草稿跟随重命名');
   await view.click({ 'data-fm-action': 'rename' });
   assert.ok(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'entries.stat' && JSON.parse(item.init.body).path === 'folder/hello.txt'), 'rename confirmation must capture a strong source version');
@@ -275,36 +309,18 @@ test('renaming a selected edited file relocates its unsaved draft', async t => {
   assert.equal(await readFile(path.join(view.root, 'folder/改名.txt'), 'utf8'), '草稿跟随重命名');
 });
 
-test('removing a root entry opens an explicit non-deleting confirmation and cancellation revokes nothing', async t => {
+test('no gesture revokes, re-binds or re-authorizes the browsing root', async t => {
   const view = await setup(t);
-  await view.click({ title: '只移除这个入口，不删除磁盘文件' });
-  assert.equal(view.manager.listRoots().length, 1, 'the sidebar action must not revoke a grant before confirmation');
-  const dialog = view.renderer.root.findAllByType(uiBoundary.Modal).find(item => item.props.open);
-  assert.ok(dialog);
-  assert.match(dialog.props.description, /不会删除.*磁盘/);
-  assert.ok(textOf(node(view.renderer, { 'data-fm-remove-root-preview': true })).includes(view.root));
-  const staleConfirm = node(view.renderer, { 'data-fm-action': 'remove-root-confirm' }).props.onClick;
-  await view.click({ 'data-fm-action': 'remove-root-cancel' });
-  await act(async () => { await staleConfirm(); });
-  assert.equal(view.manager.listRoots().length, 1);
-  await access(path.join(view.root, 'folder/hello.txt'));
-  assert.equal(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'roots.remove'), false);
-});
-
-test('confirmed root removal revokes only its entry and preserves disk files and the dirty draft', async t => {
-  const view = await setup(t);
-  await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
-  editorEdit(view, 'retained after grant removal');
-  const rootId = view.manager.listRoots()[0].id;
-  await view.click({ title: '只移除这个入口，不删除磁盘文件' });
-  await view.click({ 'data-fm-action': 'remove-root-confirm' });
-  assert.equal(view.manager.listRoots().length, 0);
-  assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), '<script>not executable</script>\n你好');
-  assert.equal(editorProps(view.renderer)?.value, 'retained after grant removal');
-  assert.equal(nodes(view.renderer, { 'data-fm-missing': true }).length, 1);
-  const removals = view.requests.filter(item => item.init.body && JSON.parse(item.init.body).op === 'roots.remove');
-  assert.equal(removals.length, 1);
-  assert.equal(JSON.parse(removals[0].init.body).rootId, rootId);
+  const rootId = view.manager.getRoot().id;
+  await view.openHello();
+  editorEdit(view, 'saved while the root stays fixed');
+  await view.click({ 'data-fm-action': 'save' });
+  await view.settle();
+  assert.equal(view.manager.getRoot().id, rootId, 'the root id is decided at Host start and never changes');
+  assert.equal(await readFile(path.join(view.root, 'folder/hello.txt'), 'utf8'), 'saved while the root stays fixed');
+  assert.deepEqual(view.requests.filter(item => item.init.body && String(JSON.parse(item.init.body).op).startsWith('roots.')), [],
+    'no operation may address the removed location surface');
+  // Revoking a location used to mean "stop browsing"; it was never a deletion.
   assert.equal(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'delete.commit'), false);
 });
 
@@ -348,10 +364,11 @@ test('cancelling deletion preparation prevents a late manifest from reopening or
   await view.openHello();
   let operation;
   await act(async () => { operation = node(view.renderer, { 'data-fm-action': 'delete' }).props.onClick(); await preparing; });
+  assert.equal(nodes(view.renderer, { role: 'dialog', 'aria-label': '永久删除这些条目？' }).length, 1, 'the deletion-specific selector must identify the preparing confirmation');
   await act(async () => { await node(view.renderer, { 'data-fm-action': 'delete-cancel' }).props.onClick(); });
-  assert.equal(nodes(view.renderer, { role: 'dialog' }).length, 0);
+  assert.equal(nodes(view.renderer, { role: 'dialog', 'aria-label': '永久删除这些条目？' }).length, 0);
   await act(async () => { release(); await operation; });
-  assert.equal(nodes(view.renderer, { role: 'dialog' }).length, 0);
+  assert.equal(nodes(view.renderer, { role: 'dialog', 'aria-label': '永久删除这些条目？' }).length, 0);
   assert.equal(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'delete.commit'), false);
   await access(path.join(view.root, 'folder/hello.txt'));
 });
@@ -434,13 +451,14 @@ test('a stale deletion preview cannot remove replacement content', async t => {
 test('an externally deleted file remains an invalid draft and cannot be recreated by save', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   editorEdit(view, 'retain after deletion');
   await rm(path.join(view.root, 'folder/hello.txt'));
   await view.click({ 'data-fm-action': 'refresh' });
   assert.equal(editorProps(view.renderer)?.value, 'retain after deletion');
-  assert.equal(node(view.renderer, { 'data-fm-action': 'save' }).props.disabled, true);
-  await view.click({ 'data-fm-action': 'save' });
+  assert.equal(editorProps(view.renderer)?.canWrite, false);
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'save' }).length, 0);
+  await act(async () => { editorProps(view.renderer).onSave(); await view.settle(); });
   await assert.rejects(access(path.join(view.root, 'folder/hello.txt')), { code: 'ENOENT' });
 });
 
@@ -449,7 +467,7 @@ test('copy clipboard survives panel remount and publishes through the real task 
   await view.openHello();
   await view.click({ 'data-fm-action': 'copy' });
   view.unmount(); await view.mount();
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await view.click({ 'data-fm-action': 'paste' });
   await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list();
@@ -464,7 +482,7 @@ test('copy clipboard survives panel remount and publishes through the real task 
 test('an overwrite paste binds the reviewed destination version and refuses a later replacement', async t => {
   const view = await setup(t, { tasks: true, seed: root => writeFile(path.join(root, 'hello.txt'), 'original destination') });
   await view.openHello(); await view.click({ 'data-fm-action': 'copy' });
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await view.click({ 'data-fm-action': 'paste' });
   await view.click({ 'data-fm-conflict-policy': 0 });
   await view.click({ role: 'menuitem', 'data-menu-item': 'overwrite' });
@@ -495,10 +513,10 @@ test('directory paste offers skip or rename but never an implicit overwrite merg
 
 test('a cut task relocates the file while retaining and relocating its unsaved draft', async t => {
   const view = await setup(t, { tasks: true });
-  await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
+  await view.openHello();
   editorEdit(view, 'draft travels with the file');
   await view.click({ 'data-fm-action': 'cut' });
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await view.click({ 'data-fm-action': 'paste' }); await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list(); await view.waitForTask(task.id);
   await view.click({ 'data-fm-action': 'refresh-tasks' });
@@ -514,7 +532,7 @@ test('retrying a failed task recovers a transient I/O failure against the same s
     if (failOnce) { failOnce = false; throw Object.assign(new Error('Injected disk full'), { code: 'ENOSPC' }); }
     return manager.io.createStagedFile(...args);
   } } }) });
-  await view.openHello(); await view.click({ 'data-fm-action': 'copy' }); await view.click({ 'data-fm-root': true });
+  await view.openHello(); await view.click({ 'data-fm-action': 'copy' }); await clickRootCrumb(view);
   await view.click({ 'data-fm-action': 'paste' }); await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list();
   assert.equal((await view.waitForTask(task.id)).status, 'failed');
@@ -533,7 +551,7 @@ test('cancelling a queued copy stops uncommitted publication and leaves the sour
     await new Promise(resolve => { if (input.signal.aborted) resolve(); else input.signal.addEventListener('abort', resolve, { once: true }); });
     return manager.io.createStagedFile(input);
   } } }) });
-  await view.openHello(); await view.click({ 'data-fm-action': 'copy' }); await view.click({ 'data-fm-root': true });
+  await view.openHello(); await view.click({ 'data-fm-action': 'copy' }); await clickRootCrumb(view);
   await view.click({ 'data-fm-action': 'paste' }); await view.click({ 'data-fm-action': 'paste-confirm' });
   await starting;
   const [task] = await view.tasks.list();
@@ -594,7 +612,7 @@ test('upload overwrite checks the reviewed target version before publishing', as
   // The review control is the shared themed Menu (tests/upload-ui.test.mjs owns
   // its UI contract); this case keeps the policy's own guarantee: the version
   // the user reviewed is the one the begin request binds.
-  const reviewed = (await view.manager.io.stat({ rootId: view.manager.listRoots()[0].id, path: 'upload.txt' })).version;
+  const reviewed = (await view.manager.io.stat({ rootId: view.manager.getRoot().id, path: 'upload.txt' })).version;
   assert.equal(node(view.renderer, { 'data-fm-upload-policy': 0 }).type, 'button', 'the upload policy control is the shared themed menu trigger');
   await view.click({ 'data-fm-upload-policy': 0 });
   await view.click({ role: 'menuitem', 'data-menu-item': 'overwrite' });
@@ -617,7 +635,7 @@ test('retrying an upload retains File handles across panel remount and skips com
   const [task] = view.transfers.list();
   assert.equal(task.status, 'partial');
   assert.equal(node(view.renderer, { 'data-fm-transfer-action': 'retry', 'data-fm-transfer-id': task.id }).props.disabled, false, 'settled uploads must enable retry without requiring a remount');
-  const rootId = view.manager.listRoots()[0].id;
+  const rootId = view.manager.getRoot().id;
   const original = await view.manager.stat({ rootId, path: 'first.txt' });
   view.unmount(); await view.mount();
   await view.click({ 'data-fm-transfer-action': 'retry', 'data-fm-transfer-id': task.id });
@@ -649,7 +667,7 @@ test('download uses the native streaming URL rather than buffering a file into t
   await view.openHello(); await view.click({ 'data-fm-action': 'download' });
   const request = view.requests.find(item => item.init.body && JSON.parse(item.init.body).op === 'transfers.begin');
   assert.ok(view.requests.some(item => item.init.body && JSON.parse(item.init.body).op === 'entries.stat' && JSON.parse(item.init.body).path === 'folder/hello.txt'), 'download must acquire a strong stat snapshot rather than trusting the listing token');
-  assert.equal(JSON.parse(request.init.body).expectedVersion, (await view.manager.io.stat({ rootId: view.manager.listRoots()[0].id, path: 'folder/hello.txt' })).version, 'download selection must use an opaque strong stat version');
+  assert.equal(JSON.parse(request.init.body).expectedVersion, (await view.manager.io.stat({ rootId: view.manager.getRoot().id, path: 'folder/hello.txt' })).version, 'download selection must use an opaque strong stat version');
   const link = node(view.renderer, { 'data-fm-download': true });
   assert.ok(link.props.href.startsWith('/api/file-manager/v2/download?taskId='));
   assert.equal(view.requests.some(request => request.url.startsWith('/api/file-manager/v2/download')), false);
@@ -698,7 +716,20 @@ test('reference insertion targets only the chosen session and preserves existing
   await view.queueReference();
   assert.equal(insertions.length, 0);
   assert.deepEqual(opened, ['target']);
-  assert.equal(nodes(view.renderer, { 'data-fm-reference-request': 'target' }).length, 1, 'a target that never mounts must leave a visible retryable request in Files');
+  // One pending reference is one row: the marker also sits on the row's own two
+  // buttons, so the row is identified by its element, not by the attribute alone.
+  await view.click({ 'data-fm-action': 'show-tasks' });
+  const pendingRows = view.renderer.root.findAll(entry => entry.type === 'div' && entry.props['data-fm-reference-request'] === 'target');
+  assert.equal(pendingRows.length, 1, 'a pending reference is exactly one row');
+  const row = pendingRows[0];
+  assert.equal(row.findAll(entry => typeof entry.type === 'string' && entry.props['data-fm-action'] === 'reference-retry').length, 1,
+    'the row offers exactly one retry');
+  assert.equal(row.findAll(entry => typeof entry.type === 'string' && entry.props['data-fm-action'] === 'reference-cancel').length, 1,
+    'and exactly one cancel');
+  assert.ok(textOf(row).includes('Target session'), 'the row names the session it belongs to');
+  let insideTasks = false;
+  for (let node = row; node; node = node.parent) if (node.props?.['data-fm-overlay'] === 'tasks') { insideTasks = true; break; }
+  assert.equal(insideTasks, true, 'the pending reference lives in the task drawer, not in the file list');
   await view.mountBridge('target');
   assert.equal(insertions.length, 1);
   const insertion = insertions[0];
@@ -762,13 +793,13 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
     if (changed && url === '/api/file-manager/v2/control' && JSON.parse(init.body).op === 'text.read') observed();
     return response;
   } });
-  await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
+  await view.openHello();
   editorEdit(view, 'dirty stays');
   assert.ok(streams.length > 0, 'the panel never subscribed to Host events');
   await writeFile(path.join(view.root, 'folder/hello.txt'), 'external event');
   changed = true;
   await act(async () => {
-    streams.at(-1).controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ kind: 'invalidate', seq: 1, rootId: view.manager.listRoots()[0].id, path: 'folder', reason: 'watch' })}\n\n`));
+    streams.at(-1).controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ kind: 'invalidate', seq: 1, rootId: view.manager.getRoot().id, path: 'folder', reason: 'watch' })}\n\n`));
     await reread;
   });
   await view.flush();
@@ -780,14 +811,102 @@ test('a Host invalidation refreshes the directory while preserving an edited dra
   assert.equal(last.cancelled, true);
 });
 
-test('a closed event connection is shown as disconnected instead of claiming live observation', async t => {
+/**
+ * Every element still carrying the removed live-observation marker.
+ *
+ * `nodes()` compares exact prop values, and the point here is that the marker is
+ * gone for *every* state, so absence is asserted by membership instead of by one
+ * status string.
+ */
+const watchMarks = renderer => renderer.root.findAll(element =>
+  typeof element.type === 'string' && Object.prototype.hasOwnProperty.call(element.props, 'data-fm-watch'));
+
+/**
+ * The panel's one column, element by element.
+ *
+ * The header is followed by the file layout: the removed status line was the only
+ * thing that ever stood between them, so this order is what proves no row — and no
+ * empty placeholder — is reserved for it in any observation state.
+ */
+const panelColumns = renderer => node(renderer, { className: 'fm-base' })
+  .children.filter(child => typeof child !== 'string').map(child => child.props.className);
+const PANEL_COLUMNS = ['fm-main-header', 'fm-layout', 'fm-list-footer'];
+
+test('the panel reserves no live-observation status row', async t => {
+  const view = await setup(t);
+  assert.deepEqual(
+    panelColumns(view.renderer), PANEL_COLUMNS,
+    'the header must be followed by the file layout: no status row may hold a band of its own',
+  );
+  assert.equal(watchMarks(view.renderer).length, 0);
+  const text = textOf(view.renderer.root);
+  for (const message of [
+    '正在连接变化监测…', '实时监测中', '原生监听不可用，正在定期核对变化',
+    '目录监测不可用或超过目标数量上限，请手动刷新。', '监测已断线，正在重连并重新同步…',
+  ]) {
+    assert.equal(text.includes(message), false, `${message} must not be rendered anywhere in the panel`);
+  }
+  for (const key of ['watch.connecting', 'watch.watching', 'watch.polling', 'watch.unavailable', 'watch.disconnected']) {
+    assert.equal(view.client.t(key), key, `${key} must not resolve: the status line it described is gone`);
+  }
+});
+
+test('a closed event connection is re-established and resynchronized instead of claiming live observation', { timeout: 5000 }, async t => {
+  const streams = [];
+  let listingReads = 0;
   const view = await setup(t, { intercept: async (url, init, route) => {
-    if (url === '/api/file-manager/v2/events') return new Response(new ReadableStream({ start(controller) { controller.close(); } }));
+    if (url === '/api/file-manager/v2/events') {
+      const stream = { signal: init.signal, cancelled: false };
+      const body = new ReadableStream({ start(controller) { stream.controller = controller; }, cancel() { stream.cancelled = true; } });
+      streams.push(stream);
+      return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+    }
     const response = await route(url, init);
     if (init.body && JSON.parse(init.body).op === 'bootstrap') { const result = await response.json(); result.value.capabilities.watch = true; return new Response(JSON.stringify(result)); }
+    if (url === '/api/file-manager/v2/control' && init.body && JSON.parse(init.body).op === 'entries.list') listingReads += 1;
     return response;
   } });
-  assert.equal(nodes(view.renderer, { 'data-fm-watch': 'disconnected' }).length, 1);
+  const live = streams.at(-1);
+  assert.ok(live, 'the panel never subscribed to Host events');
+  assert.equal(live.signal.aborted, false, 'the connection under test must be the live one, not one the panel already released');
+  const subscriptions = streams.length;
+  const { rootId: currentRootId, path: currentPath } = view.runtime.location;
+  assert.ok(currentRootId, 'the panel must be located in a root before observation state can be reported for it');
+  // Every observation state the Host can report — the three that used to drive
+  // `watch.<status>` text — in order and on the live connection: none of them may
+  // reserve a row, paint a marker, move the layout or ask for another read.
+  let sequence = 0;
+  const readsBeforeStatuses = listingReads;
+  for (const status of ['watching', 'polling', 'unavailable']) {
+    await act(async () => {
+      live.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ kind: 'watch-status', seq: ++sequence, rootId: currentRootId, path: currentPath, status })}\n\n`));
+    });
+    await view.flush();
+    assert.deepEqual(panelColumns(view.renderer), PANEL_COLUMNS, `the ${status} state must not take a column of its own`);
+    assert.equal(watchMarks(view.renderer).length, 0, `the ${status} state must not paint a marker`);
+  }
+  assert.equal(listingReads, readsBeforeStatuses, 'an observation state is not a reason to re-read the directory');
+  // The Host ends the stream under the panel: a drop is a resynchronization
+  // problem, and with no status row left its effect must still be observable
+  // through the reconnect.
+  await act(async () => { live.controller.close(); });
+  assert.equal(watchMarks(view.renderer).length, 0, 'a dropped connection must not paint a status row');
+  assert.deepEqual(panelColumns(view.renderer), PANEL_COLUMNS, 'a dropped connection must not take a column of its own');
+  assert.equal(await view.waitFor(() => streams.length > subscriptions, { timeoutMs: 4000 }), true, 'a closed event connection must be re-established');
+  const before = listingReads;
+  // `ready` is what the Host sends first on a fresh connection, and its sequence
+  // restarts with the connection: the reconnect has to re-read the directory it
+  // was showing, not just reopen the socket.
+  await act(async () => {
+    streams.at(-1).controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ kind: 'ready', seq: 1 })}\n\n`));
+  });
+  assert.equal(await view.waitFor(() => listingReads > before, { timeoutMs: 2000 }), true, 'the reconnected stream must resynchronize the directory it shows');
+  assert.equal(watchMarks(view.renderer).length, 0, 'a resynchronization must not reintroduce a status row');
+  assert.deepEqual(panelColumns(view.renderer), PANEL_COLUMNS, 'a resynchronization must not reintroduce a column of its own');
+  const last = streams.at(-1);
+  view.unmount();
+  assert.equal(last.signal.aborted, true);
+  assert.equal(last.cancelled, true);
 });
 
 test('event frames spanning UTF-8 chunks are decoded exactly and in order', async t => {
@@ -907,7 +1026,7 @@ test('the optional session hook may appear after mount without breaking hook ord
   await act(async () => {
     view.renderer.update(React.createElement(panel.component, { t: view.client.t, ...panel.options.inject?.(), useSessions: sessions.use }));
   });
-  assert.equal(nodes(view.renderer, { 'data-fm-root': true }).length, 1, 'the panel still renders after the hook becomes available');
+  assert.equal(nodes(view.renderer, { className: 'fm-crumbs' }).length, 1, 'the panel still renders after the hook becomes available');
   assert.equal(node(view.renderer, { 'data-fm-action': 'reference' }).props.disabled, false, 'the session catalog is now in use');
 });
 
@@ -1036,20 +1155,24 @@ const noteNodes = view => view.renderer.root.findAll(item => typeof item.type ==
  */
 const codeLabels = view => view.renderer.root.findAll(item => typeof item.type === 'string' && item.props.className === 'fm-code-language');
 
-test('an opened file renders exactly one code editor declared as preview', async t => {
+test('an opened writable file renders exactly one directly editable and clean code editor', async t => {
   const view = await setup(t);
   await view.openHello();
   assert.equal(editorCount(view.renderer), 1, 'an opened file must render exactly one code editor');
-  assert.equal(codeMarks(view)?.['data-fm-code-mode'], 'preview', 'a file opens in preview mode');
+  assert.equal(codeMarks(view)?.['data-fm-code-mode'], 'edit', 'write permission directly enables typing');
+  assert.equal(editorProps(view.renderer)?.canWrite, true);
+  assert.equal('mode' in editorProps(view.renderer), false);
+  assert.equal(node(view.renderer, { 'data-fm-document-state': 'clean' }).children.length > 0, true);
+  assert.equal(node(view.renderer, { 'data-fm-action': 'save' }).props.disabled, true);
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'edit' }).length, 0);
 });
 
 test('the editor renders the LF-normalized draft while the footer keeps the disk metadata', async t => {
   const view = await setup(t, { seed: root => writeFile(path.join(root, 'folder/hello.txt'), '第一行\r\n第二行\r\n') });
   await view.openHello();
   assert.equal(editorProps(view.renderer)?.value, '第一行\n第二行\n', 'the editor must render the LF-normalized draft the document store owns');
-  await view.click({ 'data-fm-action': 'edit' });
-  assert.equal(editorProps(view.renderer)?.value, '第一行\n第二行\n', 'entering edit mode must not rewrite the text');
-  assert.equal(codeMarks(view)?.['data-fm-code-mode'], 'edit', 'edit mode must be declared on the editor container');
+
+  assert.equal(codeMarks(view)?.['data-fm-code-mode'], 'edit', 'write permission is declared on the editor container');
   assert.match(textOf(documentFooter(view)), /CRLF/, 'the metadata footer must keep reporting the disk line ending');
 });
 
@@ -1079,15 +1202,16 @@ test('a degraded Host stays read-only even when it still advertises write', asyn
   } });
   await view.openHello();
   assert.equal(editorProps(view.renderer)?.canWrite, false, 'a degraded Host must not render a writable editor');
-  const edit = nodes(view.renderer, { 'data-fm-action': 'edit' });
-  assert.ok(edit.length === 0 || edit[0].props.disabled === true, 'a degraded Host must not offer its edit entry point');
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'edit' }).length, 0);
+  assert.equal(nodes(view.renderer, { 'data-fm-action': 'save' }).length, 0);
+  await act(async () => { editorProps(view.renderer).onSave(); await view.settle(); });
   assert.equal(view.requests.some(item => item.url === '/api/file-manager/v2/text'), false, 'a degraded Host must not receive a text write');
 });
 
 test('the editor save callback writes the current draft to disk', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   assert.ok(editorProps(view.renderer), 'an opened file must render the code editor before its callback is exercised');
   editorEdit(view, 'saved from the editor callback');
   const onSave = editorProps(view.renderer).onSave;
@@ -1099,7 +1223,7 @@ test('the editor save callback writes the current draft to disk', async t => {
 test('a missing DOM never revives a native text control or the failure fallback', async t => {
   const view = await setup(t);
   await view.openHello();
-  await view.click({ 'data-fm-action': 'edit' });
+
   assert.equal(view.renderer.root.findAll(item => item.type === 'textarea').length, 0, 'the legacy textarea editor must not come back');
   assert.equal(nodes(view.renderer, { 'data-fm-code-fallback': 'edit' }).length, 0, 'a missing DOM must not be reported as an editor failure');
   assert.notEqual(codeMarks(view)?.['data-fm-code-highlight'], 'error', 'a missing DOM must not degrade the highlight state to error');

@@ -29,11 +29,20 @@ test('bundle declares independently installable Host and Client entrypoints', as
   assert.equal(manifest.dsh.client.platform, 'web');
 });
 
-test('a new file manager has no root grants and requires no Session', async () => {
+test('a new file manager browses the filesystem root and requires no Session', async () => {
   const module = await optionalModule('dist/host/manager.js');
   assert.equal(typeof module?.createManager, 'function', 'the Session-independent manager is missing');
   const manager = module.createManager();
-  assert.deepEqual(await manager.listRoots(), []);
+  try {
+    assert.equal(typeof manager.getRoot, 'function', 'the fixed browsing root is missing');
+    const root = manager.getRoot();
+    assert.equal(root.path, '/', 'a new installation browses the filesystem root without being configured');
+    assert.equal(root.label, '/');
+    assert.equal('listRoots' in manager, false, 'dynamic directory locations were removed');
+    assert.equal('addRoot' in manager, false, 'directory locations are no longer added at runtime');
+  } finally {
+    await manager.close();
+  }
 });
 
 test('bundle patch installs a Host row without changing any Agent preset', async () => {
@@ -55,14 +64,18 @@ test('the wire version identifies the same release as the installed package', as
   const { createManager } = await optionalModule('dist/host/manager.js');
   const { createControlHandler } = await optionalModule('dist/index.js');
   const manager = createManager();
-  const handler = createControlHandler({ manager, workspaces: () => [] });
+  const handler = createControlHandler({ manager });
   const response = await handler(new Request('http://localhost/api/file-manager/v2/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'bootstrap' }) }));
   const bootstrap = (await response.json()).value;
   assert.equal(response.status, 200);
   assert.equal(bootstrap.version, manifest.version);
   assert.equal(bootstrap.stage, 'basic-management');
   assert.equal(bootstrap.degraded, null, 'a healthy composition reports no degradation');
-  assert.deepEqual(bootstrap.roots, []);
+  assert.equal('roots' in bootstrap, false, 'the removed roots array must not come back');
+  assert.equal('workspaces' in bootstrap, false, 'workspace candidates are no longer offered as locations');
+  assert.equal('persistentRoots' in bootstrap.capabilities, false, 'root persistence was removed from the capability set');
+  assert.deepEqual(Object.keys(bootstrap.root).sort(), ['id', 'identity', 'label', 'path']);
+  assert.equal(bootstrap.root.path, '/', 'bootstrap reports the one root the Host opened');
   await manager.close();
 });
 

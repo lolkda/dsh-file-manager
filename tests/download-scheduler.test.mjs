@@ -11,9 +11,9 @@ import { createTransferService } from '../dist/host/transfers.js';
 
 async function fixture(t, scheduler = createHeavyIoScheduler({ concurrency: 1 })) {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-download-scheduler-'));
-  const manager = createManager({ scheduler });
+  const manager = createManager({ rootPath: root, scheduler });
   const service = createTransferService({ manager, scheduler });
-  const grant = await manager.addRoot({ path: root });
+  const grant = manager.getRoot();
   t.after(async () => {
     await service.close();
     await manager.close();

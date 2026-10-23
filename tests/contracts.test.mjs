@@ -80,7 +80,7 @@ function legacySources() {
 
 test('the frozen control op list is exactly the documented set', () => {
   assert.deepEqual([...protocol.CONTROL_OPS], [
-    'bootstrap', 'roots.list', 'roots.add', 'roots.remove',
+    'bootstrap',
     'entries.list', 'entries.stat', 'entries.reference', 'text.read',
     'entries.create-file', 'entries.create-directory', 'entries.rename',
     'delete.prepare', 'delete.commit', 'activities.dismiss',
@@ -89,10 +89,17 @@ test('the frozen control op list is exactly the documented set', () => {
   ]);
   assert.deepEqual([...protocol.TEXT_OPS], ['save']);
   assert.deepEqual([...protocol.MUTATION_OPS], [
-    'roots.add', 'roots.remove', 'entries.create-file', 'entries.create-directory', 'entries.rename',
+    'entries.create-file', 'entries.create-directory', 'entries.rename',
     'delete.commit', 'activities.dismiss', 'tasks.start', 'tasks.cancel', 'tasks.retry',
     'transfers.begin', 'transfers.cancel', 'transfers.retry',
   ]);
+  // The directory-location surface is gone from the wire, not merely hidden:
+  // no op, no result schema and no mutation classification may survive it.
+  for (const retired of ['roots.list', 'roots.status', 'roots.add', 'roots.reauthorize', 'roots.remove']) {
+    assert.equal(protocol.CONTROL_OPS.includes(retired), false, `${retired} must not be a wire op`);
+    assert.equal(protocol.isMutationOp(retired), false, `${retired} must not be classified as a mutation`);
+    assert.deepEqual(Object.keys(protocol.CONTROL_RESULTS).filter(op => op === retired), []);
+  }
 });
 
 test('every control op has exactly one result schema', () => {
@@ -137,7 +144,7 @@ test('limit defaults, envelope sizes and route table are frozen', () => {
   assert.equal(limits.SMALL_BODY_ADMISSION, 8);
   assert.equal(limits.LARGE_BODY_ADMISSION, 2);
   assert.equal(limits.SETTINGS_NAMESPACE, 'local-file-manager');
-  assert.equal(limits.STORAGE_NAMESPACE, 'local_file_manager');
+  assert.equal('STORAGE_NAMESPACE' in limits, false, 'the root-grant storage namespace was removed');
   assert.equal(limits.OPERATIONS_STORAGE_NAMESPACE, 'local_file_manager_operations');
   assert.equal(limits.WIRE_STAGE, 'basic-management');
   assert.deepEqual({ ...protocol.ROUTES }, {
@@ -172,7 +179,7 @@ test('the frozen op list covers every operation the legacy wire dispatcher route
   const dispatcher = path.join(root, 'index.js');
   if (!existsSync(dispatcher)) {
     // The safety net is gone: the freeze assertion above is the remaining guarantee.
-    assert.equal(protocol.CONTROL_OPS.length, 24);
+    assert.equal(protocol.CONTROL_OPS.length, 21);
     assert.equal(protocol.isMutationOp('transfers.dismiss'), false);
     return;
   }
@@ -221,7 +228,7 @@ test('mutation classification matches the shipped dispatcher requirement', async
   const tasks = createTaskService({ manager });
   const transfers = createTransferService({ manager });
   const watcher = createWatchService({ manager });
-  const handler = createControlHandler({ manager, tasks, transfers, watcher, workspaces: () => [] });
+  const handler = createControlHandler({ manager, tasks, transfers, watcher });
   try {
     const call = async payload => {
       const response = await handler(new Request('http://localhost/api/file-manager/control', {
@@ -262,9 +269,6 @@ test('mutation classification matches the shipped dispatcher requirement', async
 
 const validRequests = {
   bootstrap: { op: 'bootstrap' },
-  'roots.list': { op: 'roots.list' },
-  'roots.add': { op: 'roots.add', path: '/tmp', requestId: 'roots-add-request' },
-  'roots.remove': { op: 'roots.remove', rootId: 'root-1', requestId: 'roots-remove-request' },
   'entries.list': { op: 'entries.list', rootId: 'root-1', path: '', limit: 200 },
   'entries.stat': { op: 'entries.stat', rootId: 'root-1', path: 'nested/file.txt' },
   'entries.reference': { op: 'entries.reference', rootId: 'root-1', path: 'nested' },
@@ -322,8 +326,12 @@ test('invalid control payloads are rejected at the contract boundary', () => {
     { op: 'entries.stat', rootId: 'root-1', path: 42 },
     { op: 'entries.list', rootId: 'root-1', limit: 0 },
     { op: 'entries.list', rootId: 'root-1', limit: 501 },
-    { op: 'roots.remove', rootId: 'root-1' },
-    { op: 'roots.remove', rootId: 'root-1', requestId: 'short' },
+    { op: 'roots.list' },
+    { op: 'roots.status' },
+    { op: 'roots.add', path: '/tmp', requestId: 'retired-add-request' },
+    { op: 'roots.remove', rootId: 'root-1', requestId: 'retired-remove-request' },
+    { op: 'roots.reauthorize', rootId: 'root-1', expectedIdentity: '1:2', confirmed: true, requestId: 'retired-reauthorize-request' },
+    { op: 'entries.create-file', rootId: 'root-1', path: 'a.txt', requestId: 'short' },
     { op: 'delete.prepare', items: [] },
     { op: 'delete.prepare', items: [{ path: 'file.txt' }] },
     { op: 'activities.dismiss', requestId: 'dismiss-request', items: [] },
@@ -359,7 +367,8 @@ test('the engine owns path grammar so the wire keeps INVALID_PATH', async () => 
     assert.equal(protocol.parseControlRequest({ op: 'entries.stat', rootId: 'root-1', path }).path, path);
     assert.notEqual(views.entryPathViolation(path), undefined, `${JSON.stringify(path)} must be documented as invalid`);
   }
-  assert.equal(protocol.parseControlRequest({ op: 'roots.add', path: 'relative/path', requestId: 'roots-add-request' }).path, 'relative/path');
+  assert.throws(() => protocol.parseControlRequest({ op: 'roots.add', path: 'relative/path', requestId: 'retired-add-request' }), { code: 'INVALID_REQUEST', status: 400 },
+    'a retired operation is refused at the contract boundary, whatever arguments it carries');
   assert.equal(protocol.parseControlRequest({ op: 'entries.rename', rootId: 'root-1', path: 'a', name: 'nested/name', requestId: 'rename-request' }).name, 'nested/name');
   assert.equal(views.entryPathViolation(''), undefined, 'the empty path is the granted root');
   assert.notEqual(views.entryPathViolation('', false), undefined);
@@ -375,15 +384,14 @@ test('the engine owns path grammar so the wire keeps INVALID_PATH', async () => 
   const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const directory = await mkdtemp(path.join(tmpdir(), 'dsh-fm-contract-paths-'));
-  const manager = engine.createManager();
+  const manager = engine.createManager({ rootPath: directory });
   try {
     await writeFile(path.join(directory, 'file.txt'), 'content');
-    const grant = await manager.addRoot({ path: directory });
+    const grant = manager.getRoot();
     for (const path of malformed) {
       await assert.rejects(manager.list({ rootId: grant.id, path }), { code: 'INVALID_PATH' }, `engine must refuse ${JSON.stringify(path)}`);
       await assert.rejects(manager.readText({ rootId: grant.id, path }), { code: 'INVALID_PATH' }, `engine must refuse reading ${JSON.stringify(path)}`);
     }
-    await assert.rejects(manager.addRoot({ path: 'relative/path' }), { code: 'INVALID_PATH' });
     await assert.rejects(manager.rename({ rootId: grant.id, path: 'file.txt', name: 'nested/name', expectedVersion: '1:2:3:4:5' }), { code: 'INVALID_PATH' });
     await assert.rejects(manager.readText({ rootId: grant.id, path: '' }), { code: 'UNSUPPORTED_ENTRY' }, 'the root itself is not a text file');
   } finally {
@@ -406,6 +414,24 @@ test('semantic refusals that already have a business code stay with the Host', (
     items: Array.from({ length: 257 }, (_, index) => ({ kind: 'task', taskId: `task-${index}`, expectedHistoryRevision: 0 })),
   });
   assert.equal(oversized.items.length, 257);
+});
+
+test('single-entry compatibility rename requires a boolean per-request authorization', () => {
+  const request = { op: 'entries.rename', rootId: 'root-1', path: 'a', name: 'b', expectedVersion: WEAK, requestId: 'rename-compatible-request' };
+  assert.equal(protocol.parseControlRequest(request).allowNonExclusiveRename, undefined);
+  for (const allowed of [false, true]) {
+    assert.equal(protocol.parseControlRequest({ ...request, allowNonExclusiveRename: allowed }).allowNonExclusiveRename, allowed);
+  }
+  for (const invalid of ['true', 'false', 1, 0, null, [], {}]) {
+    assert.throws(() => protocol.parseControlRequest({ ...request, allowNonExclusiveRename: invalid }), { code: 'INVALID_REQUEST' });
+  }
+});
+
+test('classified unsupported-rename compatibility details survive normalization without widening errno details', () => {
+  const failure = new errors.FileManagerError('UNSUPPORTED_ATOMIC_RENAME', 'Unsupported atomic no-replace rename.', 501, { compatibilityAvailable: true });
+  assert.equal(errors.normalizeError(failure), failure);
+  assert.equal(errors.normalizeError(failure).details.compatibilityAvailable, true);
+  assert.equal(errors.normalizeError(Object.assign(new Error('raw error'), { code: 'EIO', details: { compatibilityAvailable: true } })).details.compatibilityAvailable, undefined);
 });
 
 test('the contract leaves version-token failures to the Host business codes', () => {
@@ -651,21 +677,26 @@ test('storage degradation is a required, discriminated bootstrap field (R17)', (
   });
   assert.equal(operations.degraded.scope, 'operations');
   assert.equal(operations.degraded.readOnly, true);
-  const roots = protocol.BootstrapViewSchema.parse({
-    ...healthy, roots: [],
+  // The browsing root can be unopenable; that is its own scope, and the client is
+  // told the truth instead of being handed an empty location list.
+  const filesystem = protocol.BootstrapViewSchema.parse({
+    ...healthy, root: null,
     capabilities: { ...healthy.capabilities, write: false, references: false },
-    degraded: { scope: 'roots', code: 'INITIALIZATION_FAILED', message: 'Stored root grants are not trustworthy.', readOnly: false },
+    degraded: { scope: 'filesystem', code: 'ROOT_UNAVAILABLE', message: 'The browsing root could not be opened.', readOnly: false },
   });
-  assert.deepEqual(roots.roots, []);
+  assert.equal(filesystem.root, null);
+  assert.equal(filesystem.degraded.scope, 'filesystem');
 
   // `null` is the only healthy signal: an absent field is not.
   const withoutField = { ...healthy };
   delete withoutField.degraded;
   assert.equal(protocol.BootstrapViewSchema.safeParse(withoutField).success, false, 'degraded is always reported');
-  // The union forbids the illegal combinations a boolean flag would allow.
+  // The union forbids the illegal combinations a boolean flag would allow, and
+  // the retired `roots` scope is no longer a legal value.
   for (const degraded of [
     { scope: 'operations', code: 'X', message: 'm', readOnly: false },
     { scope: 'roots', code: 'X', message: 'm', readOnly: true },
+    { scope: 'filesystem', code: 'X', message: 'm', readOnly: true },
     { scope: 'history', code: 'X', message: 'm', readOnly: true },
     { scope: 'operations', code: 'X', message: 'm' },
     { scope: 'operations', code: '', message: 'm', readOnly: true },
@@ -681,15 +712,29 @@ test('storage degradation is a required, discriminated bootstrap field (R17)', (
 
 function validBootstrapView() {
   return {
-    roots: [{ id: 'root-1', provider: 'host-local', path: '/srv/data', label: 'data', identity: '1:2', createdAt: ISO }],
-    workspaces: [{ id: 'w1', path: '/candidate', title: 'Workspace' }],
+    root: { id: 'root-1', path: '/srv/data', label: 'data', identity: '1:2' },
     version: manifest.version,
     stage: 'basic-management',
     limits: { ...limits.LIMIT_DEFAULTS },
-    capabilities: { write: true, persistentRoots: true, tasks: true, transfers: true, watch: true, references: true, taskHistory: true },
+    capabilities: { write: true, tasks: true, transfers: true, watch: true, references: true, taskHistory: true },
     degraded: null,
   };
 }
+
+test('the bootstrap view carries one root and no location surface', () => {
+  const parsed = protocol.BootstrapViewSchema.parse(validBootstrapView());
+  assert.deepEqual(Object.keys(parsed.root).sort(), ['id', 'identity', 'label', 'path']);
+  assert.equal(protocol.BootstrapViewSchema.safeParse({ ...validBootstrapView(), roots: [] }).success, false,
+    'the removed roots array must not be accepted again');
+  assert.equal(protocol.BootstrapViewSchema.safeParse({ ...validBootstrapView(), workspaces: [] }).success, false,
+    'workspace candidates are no longer part of the bootstrap contract');
+  assert.equal(protocol.BootstrapViewSchema.safeParse({
+    ...validBootstrapView(), capabilities: { ...validBootstrapView().capabilities, persistentRoots: true },
+  }).success, false, 'the root persistence capability was removed');
+  assert.equal(protocol.BootstrapViewSchema.safeParse({
+    ...validBootstrapView(), root: { id: 'root-1', provider: 'host-local', path: '/srv/data', label: 'data', identity: '1:2', createdAt: ISO },
+  }).success, false, 'a root descriptor no longer carries provider or createdAt');
+});
 
 test('unaddressable listing entries are structurally non-executable (R18)', () => {
   const unaddressable = { name: 'bad\\name', kind: 'file', reason: 'The name contains a backslash and cannot be addressed.' };
@@ -810,10 +855,15 @@ test('a stored record missing a required public field is reported, never silentl
 
 test('root, listing, stat and text views expose their documented fields only', () => {
   const descriptor = views.toRootDescriptor({
-    id: 'root-1', provider: 'host-local', path: '/srv/data', label: 'data', identity: '1:2', createdAt: ISO,
-    secret: 'must-not-leak',
+    id: 'root-1', path: '/srv/data', label: 'data', identity: '1:2',
+    provider: 'host-local', createdAt: ISO, secret: 'must-not-leak',
   });
-  assert.deepEqual(descriptor, { id: 'root-1', provider: 'host-local', path: '/srv/data', label: 'data', identity: '1:2', createdAt: ISO });
+  assert.deepEqual(descriptor, { id: 'root-1', path: '/srv/data', label: 'data', identity: '1:2' },
+    'a descriptor is exactly id, path, label and identity: the removed fields are dropped, never re-emitted');
+  assert.throws(() => views.toRootDescriptor({ id: 'root-1', label: 'data', identity: '1:2' }),
+    { code: 'INVALID_STATE', status: 500 }, 'a descriptor without a path is an internal fault');
+  assert.throws(() => views.toRootDescriptor({ id: 'root-1', path: '/srv/data', label: 'data', identity: 'not-an-identity' }),
+    { code: 'INVALID_STATE', status: 500 }, 'a root identity is a dev:ino pair');
   const snapshot = views.toEntrySnapshot({
     name: 'a.txt', path: 'a.txt', kind: 'file', size: 3, modifiedAt: ISO, version: WEAK, mode: 420,
     identity: '1:3', sha256: 'd'.repeat(64),
@@ -854,6 +904,20 @@ test('the deletion plan and its outcome keep only the documented fields', () => 
   assert.deepEqual(outcome.results[1].error, { code: 'VERSION_CONFLICT', message: 'changed' });
   assert.equal(JSON.stringify(outcome).includes('secret'), false);
   assert.equal(JSON.stringify(outcome).includes('identity'), false);
+});
+
+test('the root-status and re-authorization contract is gone, not merely unused', () => {
+  // Removal means the symbols a future change could wire back up are absent:
+  // a status DTO, its status vocabulary, its projector and the recovery result.
+  for (const removed of ['ROOT_STATUSES', 'RootStatusSchema', 'toRootStatus', 'toRootReauthorizeResult', 'DegradedRoots', 'DegradedRootsSchema']) {
+    assert.equal(removed in views, false, `${removed} must not be exported from views`);
+  }
+  for (const removed of ['RootsListResultSchema', 'RootStatusResultSchema', 'RootAddResultSchema', 'RootsReauthorizeResultSchema', 'RootRemoveResultSchema']) {
+    assert.equal(removed in protocol, false, `${removed} must not be exported from the protocol`);
+  }
+  // The replacement scope is the only filesystem degradation a Host may report.
+  assert.equal(views.DegradedFilesystemSchema.safeParse({ scope: 'filesystem', code: 'ROOT_UNAVAILABLE', message: 'm', readOnly: false }).success, true);
+  assert.equal(views.DegradedFilesystemSchema.safeParse({ scope: 'roots', code: 'ROOT_UNAVAILABLE', message: 'm', readOnly: false }).success, false);
 });
 
 /* ------------------------------------------------------------------ *

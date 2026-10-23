@@ -16,10 +16,10 @@ async function fixture(t, options = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-transfer-'));
   const root = path.join(base, 'root');
   await mkdir(root);
-  const manager = createManager({ scheduler: options.scheduler });
+  const manager = createManager({ rootPath: root, scheduler: options.scheduler });
   let service;
   t.after(async () => { await service?.close(); await manager.close(); await rm(base, { recursive: true, force: true }); });
-  const grant = await manager.addRoot({ path: root });
+  const grant = manager.getRoot();
   assert.equal(typeof implementation.createTransferService, 'function', 'createTransferService must be implemented');
   service = implementation.createTransferService({ manager: options.wrapManager ? options.wrapManager(manager) : manager, ...options });
   return { base, root, manager, grant, service };
@@ -418,19 +418,21 @@ test('a failed skip receipt cannot permit children to merge into an existing dir
   assert.deepEqual(await readdir(path.join(root, 'existing')), []);
 });
 
-test('revoking a root during streaming prevents publication and cleans held-parent staging', { timeout: 5000 }, async t => {
+test('a root replaced during streaming prevents publication and cleans held-parent staging', { timeout: 5000 }, async t => {
   const started = deferred();
-  const { service, manager, grant, root } = await fixture(t, { onProgress: task => { if (task.bytesTransferred) started.resolve(); } });
+  const { service, grant, root, base } = await fixture(t, { onProgress: task => { if (task.bytesTransferred) started.resolve(); } });
   const task = await service.begin(uploadInput(grant));
   let source;
   const sending = service.handleUpload(uploadRequest(task, task.items[0], new ReadableStream({ start(controller) { source = controller; controller.enqueue(Buffer.from('a')); } })));
   await started.promise;
-  await manager.removeRoot({ rootId: grant.id });
+  await rename(root, path.join(base, 'root-old'));
+  await mkdir(root);
   source.enqueue(Buffer.from('bcd')); source.close();
   const response = await reply(await sending);
-  assert.equal(response.error.code, 'ROOT_NOT_FOUND');
+  assert.equal(response.error.code, 'ROOT_CHANGED', 'a replacement directory must never inherit the upload');
   assert.equal(response.value.items[0].committed, false);
-  assert.deepEqual(await readdir(root), []);
+  assert.deepEqual(await readdir(root), [], 'the replacement receives nothing');
+  assert.deepEqual(await readdir(path.join(base, 'root-old')), [], 'its staging file is still cleaned up');
 });
 
 test('failure after physical publication preserves committed truth and cannot be retried as a rollback', async t => {

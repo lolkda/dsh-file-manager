@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import React from 'react';
@@ -132,6 +132,7 @@ export const editorContainers = renderer => renderer.root.findAll(node =>
 export const editorEdit = (view, text) => {
   const props = editorProps(view.renderer);
   assert.ok(props, 'the panel must render the code editor before it can receive text');
+  assert.equal(props.canWrite, true, 'the editor must permit typing before a test delivers draft input');
   act(() => props.onChange(text));
 };
 
@@ -144,7 +145,12 @@ export async function setup(t, options = {}) {
   const { createFileManagerRouter } = await import('../dist/host/http.js');
   const { resolveLimits } = await import('../dist/contracts/limits.js');
   const { createEventHub } = await import('../dist/host/watch.js');
-  const root = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-client-'));
+  // `rootName` names the browsing root itself, so a suite that needs a root
+  // whose label differs from the temporary directory's can still address every
+  // file through `view.root`. The label is the directory's base name.
+  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-manager-client-'));
+  const root = options.rootName === undefined ? base : path.join(base, options.rootName);
+  if (options.rootName !== undefined) await mkdir(root);
   let manager, tasks, transfers, watcher, events, client, result;
   const taskSnapshots = new Map();
   const taskWaiters = new Map();
@@ -156,13 +162,15 @@ export async function setup(t, options = {}) {
     await tasks?.close();
     await transfers?.close();
     await manager?.close();
-    await rm(root, { recursive: true, force: true });
+    await rm(base, { recursive: true, force: true });
   });
   await mkdir(path.join(root, 'folder'));
   await writeFile(path.join(root, 'folder', 'hello.txt'), '<script>not executable</script>\n你好');
   await options.seed?.(root);
-  manager = createManager();
-  await manager.addRoot({ path: root });
+  // The browser boundary is the one fixed root the Host opened at construction:
+  // the temporary directory stands in for the deployed `/`, so every write the
+  // panel makes lands in an isolated tree instead of the real filesystem root.
+  manager = createManager({ ...(options.managerOptions ?? {}), rootPath: root });
   if (options.tasks) {
     const { createTaskService } = await import('../dist/host/tasks.js');
     tasks = createTaskService({ manager: options.wrapTaskManager?.(manager) ?? manager, ...options.taskOptions, onChange(task) {
@@ -194,9 +202,9 @@ export async function setup(t, options = {}) {
   const quietEvents = () => new Response(new ReadableStream({ start() {}, cancel() {} }), { headers: { 'content-type': 'text/event-stream' } });
   const router = createFileManagerRouter({
     manager, tasks, transfers, watcher, events,
-    workspaces: options.controlOptions?.workspaces ?? (() => options.workspaces ?? []),
     limits: resolveLimits(options.limits ?? {}),
-    persistentRoots: options.persistentRoots ?? true,
+    degraded: options.degraded ?? null,
+    readOnly: options.readOnly ?? false,
   });
   const pending = new Set();
   const requests = [];
@@ -215,7 +223,26 @@ export async function setup(t, options = {}) {
   client = await loadClient(fetchImpl, options);
   let panel = client.cells.get('main:file-manager');
   assert.ok(panel, 'the independent main panel is missing');
-  result = { renderer: null, client, manager, tasks, transfers, watcher, events, root, pending, requests };
+  // The panel's own injected props carry the shared stores and runtime, so a test
+  // can read the state the UI commits (documents, clipboard) without reaching
+  // into the component. `request` goes through the same recording and
+  // interception path as the panel's own traffic.
+  const injected = panel.options.inject?.() ?? {};
+  result = {
+    renderer: null, client, manager, tasks, transfers, watcher, events, root, pending, requests,
+    runtime: injected.runtime, documents: injected.documents, activity: injected.activity,
+    // The notification store is plugin-owned and outlives this view, so a test
+    // reads it exactly like the panel does: from the injected props. The
+    // terminal reporter is the UI's own path for an outcome it just saw, which is
+    // the only way a same-turn terminal state is announced.
+    notifications: injected.notifications,
+    reportTerminal: injected.reportTerminal,
+    request: (url, init) => fetchImpl(url, init),
+  };
+  // A startup location is usually a literal, but a suite that has to name the
+  // root this fixture opened can derive it from the same objects the panel sees.
+  const startup = typeof options.initialLocation === 'function' ? options.initialLocation(result) : options.initialLocation;
+  if (startup && result.runtime) result.runtime.location = { ...startup };
   result.waitForTask = taskId => {
     const current = taskSnapshots.get(taskId);
     if (current && !['queued', 'running'].includes(current.status)) return Promise.resolve(current);
@@ -267,13 +294,25 @@ export async function setup(t, options = {}) {
     });
     if (settle) await result.flush();
   };
-  result.unmount = () => act(() => result.renderer.unmount());
+  result.unmount = () => {
+    const mounted = result.renderer;
+    result.renderer = null;
+    if (mounted) act(() => mounted.unmount());
+  };
   result.reloadClient = async () => {
     result.unmount();
     await client.dispose();
     client = await loadClient(fetchImpl, options);
     result.client = client;
     panel = client.cells.get('main:file-manager');
+    // A re-applied plugin owns fresh stores; expose exactly what it injects so a
+    // test can tell a remounted view from a rebuilt plugin.
+    const refreshed = panel.options.inject?.() ?? {};
+    result.runtime = refreshed.runtime;
+    result.documents = refreshed.documents;
+    result.activity = refreshed.activity;
+    result.notifications = refreshed.notifications;
+    result.reportTerminal = refreshed.reportTerminal;
     await result.mount();
   };
   result.click = async props => {
@@ -292,6 +331,30 @@ export async function setup(t, options = {}) {
   await result.mount({ settle: options.settleInitial !== false });
   return result;
 }
+
+/**
+ * The `dev:ino` identity the Host opens a root with.
+ *
+ * The identity is observed, never assumed: a fixture that swaps the directory
+ * behind the root spells the replacement's real identity with this helper.
+ */
+export async function directoryIdentity(directory) {
+  const info = await stat(directory, { bigint: true });
+  return `${info.dev}:${info.ino}`;
+}
+
+/**
+ * Navigates back to the browsing root the way the panel itself does.
+ *
+ * Directory locations are gone, so the breadcrumb region is the only root-level
+ * entry point: its first control is the root itself.
+ */
+export const clickRootCrumb = async view => {
+  const nav = node(view.renderer, { className: 'fm-crumbs' });
+  const control = nav.findAll(candidate => candidate.type === 'button')[0];
+  assert.ok(control, 'the breadcrumb region must offer the root control');
+  await act(async () => { await control.props.onClick(); await view.settle(); });
+};
 
 // A minimal implementation of the documented selector-hook boundary. This
 // models only externally owned snapshots, not the Harness input application.

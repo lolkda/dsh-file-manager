@@ -55,7 +55,7 @@ async function openReferenceDialog(t, answer, { selectSecondEntry = false } = {}
   return view;
 }
 
-const dialog = view => node(view.renderer, { role: 'dialog' });
+const dialog = view => node(view.renderer, { role: 'dialog', 'aria-label': '选择目标会话' });
 const reference = mention => ({ ok: true, value: { rootId: 'root-1', path: 'folder/hello.txt', kind: 'file', absolutePath: '/tmp/root/folder/hello.txt', mention } });
 
 test('a reference answer without a mention still keys every plan row', async t => {

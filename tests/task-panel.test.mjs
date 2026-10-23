@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { access, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { act, editorEdit, editorProps, loadClient, node, nodes, setup, textOf } from './client-harness.mjs';
+import { act, clickRootCrumb, editorEdit, editorProps, loadClient, node, nodes, setup, textOf } from './client-harness.mjs';
 
 // These are activity-model and actual React component tests, not a mock page.
 // Wire snapshots below exercise Client contract races independently of the
@@ -213,7 +213,7 @@ test('finalizing terminal activities keep refreshing until canDismiss becomes tr
 
 test('collapsing keeps task counts, editor state and event subscription alive', async t => {
   const { view, events } = await historyPanel(t, { watch: true, taskRecords: [taskSnapshot({ status: 'running', canDismiss: false })] });
-  await view.openHello(); await view.click({ 'data-fm-action': 'edit' });
+  await view.openHello();
   editorEdit(view, 'draft remains mounted');
   const stream = events.at(-1);
   await view.click({ 'data-fm-history-action': 'toggle' });
@@ -230,7 +230,7 @@ test('collapsing keeps task counts, editor state and event subscription alive', 
 async function copyHello(view) {
   await view.openHello();
   await view.click({ 'data-fm-action': 'copy' });
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await view.click({ 'data-fm-action': 'paste' });
   await view.click({ 'data-fm-action': 'paste-confirm' });
   const [task] = await view.tasks.list();
@@ -239,7 +239,7 @@ async function copyHello(view) {
   return view.tasks.get({ taskId: task.id });
 }
 async function uploadText(view, name = 'history-upload.txt') {
-  await view.click({ 'data-fm-root': true });
+  await clickRootCrumb(view);
   await act(async () => { await node(view.renderer, { 'data-fm-upload-files': true }).props.onChange({ target: { files: [new File(['upload history'], name)], value: '' } }); });
   await view.click({ 'data-fm-action': 'upload-confirm' });
   return view.transfers.list()[0];

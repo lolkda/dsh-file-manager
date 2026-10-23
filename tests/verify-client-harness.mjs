@@ -18,6 +18,7 @@ const h = React.createElement;
 
 /** Minimal stand-ins for the browser module table the bundle expects. */
 export const uiBoundary = {
+  IconCloseOutlineRegular({ size = 16, className }) { return h('svg', { width: size, height: size, className, 'aria-hidden': true, 'data-test-host-icon': 'close' }); },
   Button({ variant, size, icon, children, ...attrs }) { return h('button', attrs, icon, children); },
   Input({ icon, className, ...attrs }) { return h('span', { className }, icon, h('input', attrs)); },
   Modal({ open, onClose, title, closeLabel, description, children, footer, className, contentClassName }) {
