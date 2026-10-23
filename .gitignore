@@ -11,8 +11,10 @@ host/native/rename-no-replace
 artifacts/
 *.tgz
 
-# Logs and editor/OS noise
+# Logs, crash dumps, and editor/OS noise
 *.log
+core
+core.*
 .DS_Store
 
 # Compiled output (rebuild with `npm run build`)
