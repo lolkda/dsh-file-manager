@@ -264,7 +264,7 @@ type DegradedView =
 
 只有 helper 明确返回不支持的 `UNSUPPORTED_ATOMIC_RENAME`/501 业务错误带 `details.compatibilityAvailable: true`；helper 无法启动、权限失败、未知执行结果无该标记。此业务错误详情不改变原始 errno 的公开详情白名单。兼容操作仍保留请求幂等：改变授权字段须使用新 requestId；相同请求重放原回执。成功仍返回 `EntryStat`，已提交后同步/读取错误沿用 committed 语义。
 
-此行为仅用于单项重命名，任务与目录发布继续严格原子不覆盖。界面必须按 [兼容重命名规格 R-003](specs/nfs-compatible-rename.md) 逐次确认，不能自动回退或因其他操作的错误开放兼容入口。
+此行为仅用于单项重命名，任务与目录发布继续严格原子不覆盖。客户端对单项重命名的首次提交直接携带 `allowNonExclusiveRename: true`，界面不提供单独的风险勾选或兼容按钮；Host 仍先尝试原子不覆盖，只有明确不支持时才回退。不能因其他操作的错误开放兼容入口。界面与验收以 [重命名直接兼容提交](specs/rename-direct-compatible.md) 为准。
 
 ## 6. HTTP 路由与准入
 

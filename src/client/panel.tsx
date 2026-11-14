@@ -138,22 +138,12 @@ export function Panel(props: PanelProps): ReactNode {
   const [nameDialog, setNameDialog] = useState<{ kind: 'file' | 'directory' | 'rename'; rootId: string; directory: string; entry: EntryStat | null } | null>(null);
   const [nameInput, setNameInput] = useState('');
   /**
-   * What the name dialog's own submission must show, and — kept apart — the
-   * refusal that a compatible rename alone may resolve.
-   *
-   * `nameFailure` is the error this dialog is showing: every step of its
-   * submission writes it, including a failure *after* a committed rename.
-   * `nameRefusal` is written only by the `entries.rename` request itself, so no
-   * later failure — not even one that repeats the same code — can open the
-   * compatibility entry. `nameCompatibility` is the acknowledgement given for one
-   * submission; it is cleared when that submission starts, on an edit, on cancel
-   * and after every outcome. None of the three is the shared `error` slot, so
-   * another action's failure can never reach this dialog, and this dialog's
-   * failure can never reach another one.
+   * The error this dialog is showing. Every step of its submission writes it,
+   * including a failure *after* a committed rename. It is not the shared `error`
+   * slot, so another action's failure can never reach this dialog, and this
+   * dialog's failure can never reach another one.
    */
   const [nameFailure, setNameFailure] = useState<unknown>(null);
-  const [nameRefusal, setNameRefusal] = useState<unknown>(null);
-  const [nameCompatibility, setNameCompatibility] = useState(false);
   const [deleteDialog, setDeleteDialog] = useState<DeleteAttempt | null>(null);
   /**
    * The notification drawer is a peer overlay, not one of the `surface` values:
@@ -244,23 +234,8 @@ export function Panel(props: PanelProps): ReactNode {
   const button = (label: string, attributes: Record<string, unknown> = {}): ReactNode =>
     <Button variant="ghost" size="sm" type="button" {...attributes}>{t(label)}</Button>;
 
-  /**
-   * The one refusal the UI may resolve with the plain rename.
-   *
-   * The code alone is not enough: a helper that cannot be started and a permission
-   * failure are reported with `UNSUPPORTED_ATOMIC_RENAME` but carry no marker, an
-   * unconfirmed outcome is `ATOMIC_RENAME_UNCERTAIN` and is out of scope entirely,
-   * and the Host marks only a filesystem that provably cannot do a no-replace
-   * rename. This answers about the request it is given — never about a later step
-   * of the same submission, and never from memory.
-   */
-  const allowsNonExclusiveRename = (failure: unknown): boolean => {
-    if (failureCodeOf(failure) !== 'UNSUPPORTED_ATOMIC_RENAME') return false;
-    const details = typeof failure === 'object' && failure !== null ? (failure as { details?: unknown }).details : undefined;
-    return typeof details === 'object' && details !== null && (details as { compatibilityAvailable?: unknown }).compatibilityAvailable === true;
-  };
-  /** One name attempt owns its failure, its refusal and its acknowledgement; none is inherited. */
-  const discardNameAttempt = (): void => { setNameFailure(null); setNameRefusal(null); setNameCompatibility(false); };
+  /** One name attempt owns its failure; a later attempt never inherits it. */
+  const discardNameAttempt = (): void => { setNameFailure(null); };
 
   function commitListing(next: ListingState): void {
     listingRef.current = next;
@@ -1174,17 +1149,13 @@ export function Panel(props: PanelProps): ReactNode {
   /**
    * One submission of the name dialog.
    *
-   * `allowNonExclusiveRename` is true only for the reviewed compatibility action,
-   * which is a second, separately acknowledged submission of the same attempt. It
-   * is re-checked here instead of being trusted from the view: the button carries
-   * no authority, and Enter, the primary action and every create submit strictly.
+   * A rename is a single form submission: its first and only request authorizes
+   * the Host's compatible fallback. The Host still tries atomic no-replace first,
+   * so the authorization only changes the outcome when the filesystem itself
+   * proves that guarantee is unavailable.
    */
-  const submitName = (allowNonExclusiveRename: boolean): void => {
+  const submitName = (): void => {
     if (busy || nameSubmitting.current) return;
-    if (allowNonExclusiveRename && (!nameCompatibility || !allowsNonExclusiveRename(nameRefusal))) return;
-    // The acknowledgement was given to the submission that is starting now, so it
-    // ends with it: nothing stays authorized while this request is in flight.
-    setNameCompatibility(false);
     nameSubmitting.current = true;
     void run(async () => {
       if (!allowed.write || !nameDialog) return;
@@ -1196,16 +1167,10 @@ export function Panel(props: PanelProps): ReactNode {
        * shared slot stays untouched. A failure that lands after the view is gone
        * has no dialog left to speak through, so it is recorded in the history
        * exactly like any other confirmed persistent mutation.
-       *
-       * `refusal` marks the rename request itself — the only failure that may ever
-       * offer the compatible rename. A later failure of the same submission, even
-       * one repeating the same code, is shown (when the view is alive) without any
-       * compatibility entry.
        */
-      const reject = (failure: unknown, refusal = false): void => {
+      const reject = (failure: unknown): void => {
         if (!alive.current) { if (!runtime.controller.signal.aborted) notifyFailure(failure); return; }
         setNameFailure(failure);
-        setNameRefusal(refusal ? failure : null);
       };
       if (!nameInput || nameInput === '.' || nameInput === '..' || /[/\0]/.test(nameInput)) {
         reject(Object.assign(new Error('A single name is required.'), { code: 'INVALID_PATH' }));
@@ -1215,19 +1180,16 @@ export function Panel(props: PanelProps): ReactNode {
         const source = operation.entry;
         let result;
         try {
-          // A fresh request id per logical submission: the compatible rename is a
-          // different authorization and must never replay the refused one. The
-          // version is the one this dialog captured, never re-read here, so the
-          // Host's own re-check decides — the UI cannot refresh a bypass.
+          // A fresh request id per logical submission. The version is the one this
+          // dialog captured, never re-read here, so the Host's own re-check
+          // decides — the UI cannot refresh a bypass.
           result = await api.control({
             op: 'entries.rename', requestId: api.requestId(), rootId: operation.rootId, path: source.path, name: nameInput,
-            expectedVersion: source.version,
-            ...(allowNonExclusiveRename ? { allowNonExclusiveRename: true as const } : {}),
+            expectedVersion: source.version, allowNonExclusiveRename: true as const,
           }, { persistent: true });
-        } catch (failure) { reject(failure, true); return; }
+        } catch (failure) { reject(failure); return; }
         // The rename is committed from here on. A document that cannot follow it is
-        // a failure of this submission — reported in the same place, with no
-        // compatibility entry, because the rename itself was never refused.
+        // a failure of this submission and is reported in the same place.
         const affected = documents.getSnapshot().documents.filter(document => document.rootId === operation.rootId && (document.path === source.path || document.path.startsWith(`${source.path}/`)));
         for (const document of affected) {
           const nextPath = result.path + document.path.slice(source.path.length);
@@ -1366,20 +1328,6 @@ export function Panel(props: PanelProps): ReactNode {
   };
 
   const dialogContext = { t, ui, busy: busy > 0, errorText };
-  /**
-   * The reviewed downgrade this name dialog may offer.
-   *
-   * It is derived, per render, from this attempt's own rename refusal: no later
-   * failure of the same submission, no other action's failure, no cached answer and
-   * no other dialog can produce it.
-   */
-  const nameCompatibilityOffer = nameDialog?.kind === 'rename' && allowsNonExclusiveRename(nameRefusal)
-    ? {
-      acknowledged: nameCompatibility,
-      onAcknowledge: (acknowledged: boolean) => setNameCompatibility(acknowledged === true),
-      onSubmit: () => submitName(true),
-    }
-    : null;
 
   /**
    * Follows a notification's own navigation target.
@@ -1641,10 +1589,9 @@ export function Panel(props: PanelProps): ReactNode {
       </Overlay>
       {nameDialog ? <NameDialog
         {...dialogContext} error={nameFailure} kind={nameDialog.kind} value={nameInput}
-        compatibility={nameCompatibilityOffer}
         onCancel={() => { discardNameAttempt(); setNameDialog(null); }}
         onChange={value => { discardNameAttempt(); setNameInput(value); }}
-        onSubmit={() => submitName(false)}
+        onSubmit={() => submitName()}
       /> : null}
       <DeleteDialog
         {...dialogContext} write={allowed.write === true} attempt={deleteDialog}

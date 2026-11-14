@@ -1,6 +1,6 @@
 {
   "name": "@lolkda/dsh-file-manager",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Independent DSH file manager rooted at the Host filesystem",
   "keywords": [
     "dsh",
