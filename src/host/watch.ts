@@ -1,4 +1,5 @@
 import { watch as nativeWatch } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { FileManagerError } from '../contracts/errors.js';
 import { EVENT_MAX_QUEUED, WATCH_MAX_RECORDS, WATCH_MAX_TARGETS } from '../contracts/limits.js';
 import type { DirectoryLease } from './io.js';
@@ -69,11 +70,40 @@ interface WatchRecord {
   inFlight: Promise<void> | null;
   closePromise: Promise<void> | null;
   statusKey: string;
+  /** Fingerprint of the last successfully observed listing. */
+  lastSignature: string | null;
   stopped: boolean;
   nativeDisabled: boolean;
   interval: NodeJS.Timeout | null;
   debounce: NodeJS.Timeout | null;
   pendingReason: string | null;
+}
+
+/**
+ * A stable fingerprint of everything a directory observation can invalidate:
+ * addressable entry metadata including the version stamp, plus names that the
+ * path grammar cannot express. Polling without a change must stay silent; a
+ * directory whose entries merely get re-read is not a change event.
+ */
+function listingSignature(listing: Awaited<ReturnType<DirectoryLease['listing']>>): string {
+  const digest = createHash('sha256');
+  for (const entry of listing.entries) {
+    digest.update(entry.name ?? '');
+    digest.update('\u0000');
+    digest.update(entry.kind);
+    digest.update('\u0000');
+    digest.update(entry.version);
+    digest.update('\u0000');
+  }
+  for (const entry of listing.unaddressable) {
+    digest.update(entry.name);
+    digest.update('\u0000');
+    digest.update(entry.kind);
+    digest.update('\u0000');
+    digest.update(entry.reason);
+    digest.update('\u0000');
+  }
+  return digest.digest('hex');
 }
 
 /** Shared, reference-counted observations over authorized directory leases. */
@@ -158,10 +188,17 @@ export function createWatchService({ manager, pollIntervalMs = 2000, debounceMs 
         }
         // Observe through the lease again, not through a raw absolute path. A
         // name the grammar cannot express must not fail the whole observation.
-        await record.lease.entries();
+        const listing = await record.lease.listing();
         if (record.stopped || stopped) return;
+        const signature = listingSignature(listing);
+        const changed = record.lastSignature === null || signature !== record.lastSignature;
+        record.lastSignature = signature;
         status(record, record.watcher ? 'watching' : 'polling');
-        publish(record, { kind: 'invalidate', reason: recovering ? 'recovered' : reason });
+        // A periodic reconciliation is a probe, not a change. Publishing every
+        // probe made the Client discard and re-read paged listings on an idle
+        // directory; only the first observation or an actual difference is an
+        // invalidation.
+        if (changed) publish(record, { kind: 'invalidate', reason: recovering ? 'recovered' : reason });
       } catch (error) {
         if (record.stopped || stopped) return;
         status(record, 'unavailable', (error as NodeJS.ErrnoException).code ?? 'IO_ERROR');
@@ -218,7 +255,7 @@ export function createWatchService({ manager, pollIntervalMs = 2000, debounceMs 
           if (records.size >= WATCH_MAX_RECORDS) throw new FileManagerError('TOO_MANY_REQUESTS', 'Too many active directory observations.', 429);
           record = {
             key, target, listeners: new Map(), lease: null, watcher: null, inFlight: null, closePromise: null,
-            statusKey: '', stopped: false, nativeDisabled: false, interval: null, debounce: null, pendingReason: null,
+            statusKey: '', lastSignature: null, stopped: false, nativeDisabled: false, interval: null, debounce: null, pendingReason: null,
           };
           records.set(key, record);
           record.interval = setInterval(() => { void refresh(record as WatchRecord, 'reconcile'); }, pollIntervalMs);

@@ -51,7 +51,7 @@ test('an external file creation invalidates the watched directory without fs/obs
   const release = await service.subscribe([target], stream.receive);
   t.after(release);
   assert.equal((await stream.next(event => event.kind === 'watch-status')).status, 'watching');
-  const next = stream.next(event => event.kind === 'invalidate' && event.reason === 'watch');
+  const next = stream.next(event => event.kind === 'invalidate' && ['watch', 'reconcile'].includes(event.reason));
   await writeFile(path.join(root, 'external.txt'), 'outside the manager');
   assert.equal((await next).rootId, target.rootId);
   assert.ok((await manager.list(target)).entries.some(entry => entry.name === 'external.txt'));
@@ -68,6 +68,19 @@ test('an editor-style atomic replacement triggers a fresh directory observation'
   await rename(path.join(root, '.replacement'), path.join(root, 'file'));
   await next;
   assert.equal(await readFile(path.join(root, 'file'), 'utf8'), 'new');
+});
+
+test('periodic reconciliation stays silent while the directory is unchanged', async t => {
+  const { service, target } = await fixture(t, { watchFactory() { throw Object.assign(new Error('unsupported'), { code: 'ENOSYS' }); } });
+  const seen = [];
+  const release = await service.subscribe([target], event => seen.push(event));
+  t.after(release);
+  // The subscription's first verification publishes one recovery observation;
+  // every later poll over the same entries must not manufacture a change.
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(seen.filter(event => event.kind === 'invalidate').length, 1,
+    'an unchanged directory must not emit a new invalidation on every poll');
+  assert.equal(seen.some(event => event.kind === 'watch-status' && event.status === 'polling'), true);
 });
 
 test('unsupported native watching falls back to periodic reconciliation', async t => {
@@ -143,7 +156,7 @@ test('the event response carries OS invalidations and task events with per-conne
     const task = await readEvent(reader, event => event.kind === 'task');
     assert.equal(task.taskId, 'task-1');
     await writeFile(path.join(root, 'event.txt'), 'new');
-    const changed = await readEvent(reader, event => event.kind === 'invalidate' && event.reason === 'watch');
+    const changed = await readEvent(reader, event => event.kind === 'invalidate' && ['watch', 'reconcile'].includes(event.reason));
     assert.ok(changed.seq > task.seq);
   } finally { clearTimeout(deadline); controller.abort(); await reader.cancel(); hub.close(); }
 });

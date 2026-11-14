@@ -19,13 +19,16 @@
  *  - a dialog belongs to one attempt, so a late response after cancel/replace can
  *    neither reopen it nor submit anything;
  *  - pagination is deduplicated by directory generation and cursor, and a page
- *    already in flight is never re-requested with the same cursor;
+ *    already in flight is never re-requested with the same cursor; refreshing
+ *    the directory that is already open re-reads at least the pages the user
+ *    has loaded instead of silently collapsing the list to page one;
  *  - the optional session hook is called unconditionally, so a `useSessions`
  *    prop that appears after mount cannot reorder hooks.
  */
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { EntrySnapshot, EntryStat, EntryVersion, RootDescriptor } from '../contracts/views.js';
+import { DIRECTORY_PAGE_DEFAULT, DIRECTORY_PAGE_MAX } from '../contracts/limits.js';
 import { failureCode, type Translate } from './i18n.js';
 import { createApi, failureCodeOf, isMissingFailure, type Api } from './api.js';
 import type { ActivityStore } from './activity.js';
@@ -265,6 +268,28 @@ export function Panel(props: PanelProps): ReactNode {
   }
 
   /**
+   * One listing page on the wire, normalized once so appends and multi-page
+   * refreshes cannot disagree about which fields they carry.
+   */
+  async function requestListingPage(id: string, relative: string, cursor: string | null, limit?: number): Promise<ListingPage> {
+    const value = await api.control({
+      op: 'entries.list',
+      rootId: id,
+      path: relative,
+      ...(cursor ? { cursor } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    return {
+      rootId: value.rootId,
+      path: value.path,
+      entries: value.entries,
+      total: value.total,
+      nextCursor: value.nextCursor,
+      unaddressable: (value.unaddressable ?? []) as readonly UnaddressableEntry[],
+    };
+  }
+
+  /**
    * Publishes one event. The store is plugin-owned, so this keeps working after
    * this view unmounts. Only plain data travels: already-translated text, a typed
    * navigation target and the text to copy — never a callback or a live node.
@@ -355,27 +380,66 @@ export function Panel(props: PanelProps): ReactNode {
     // directory that has since been replaced — or from a listing that a refresh
     // has already superseded — still fails the ticket check below.
     const ticket = append ? generation.current : ++generation.current;
-    const cursor = append ? listingRef.current.nextCursor : null;
+    const previous = listingRef.current;
+    const cursor = append ? previous.nextCursor : null;
+    // Re-listing the directory already on screen is a refresh, not navigation:
+    // it must re-read at least the same number of rows the user has loaded.
+    // Otherwise any watcher invalidation turns 400 rows back into page one.
+    const preserveLoaded = !append && previous.entries.length > 0
+      && previous.rootId === id && previous.path === relative;
+    const targetEntries = preserveLoaded ? previous.entries.length : 0;
     if (append) appendPending.current = true;
     /** The lifetime this request belongs to; a late answer must not navigate. */
     const asked = lifetime.current?.signal;
     try {
-      const value = await api.control({ op: 'entries.list', rootId: id, path: relative, ...(cursor ? { cursor } : {}) });
+      let page = await requestListingPage(
+        id, relative, cursor,
+        preserveLoaded
+          ? Math.min(Math.max(targetEntries, DIRECTORY_PAGE_DEFAULT), DIRECTORY_PAGE_MAX)
+          : undefined,
+      );
       if (!alive.current || ticket !== generation.current) return;
-      const page: ListingPage = {
-        rootId: value.rootId,
-        path: value.path,
-        entries: value.entries,
-        total: value.total,
-        nextCursor: value.nextCursor,
-        unaddressable: (value.unaddressable ?? []) as readonly UnaddressableEntry[],
-      };
+      if (preserveLoaded && page.entries.length < targetEntries) {
+        // A page can contain unaddressable names, and an older page size may be
+        // smaller than the requested limit. Continue with the remaining row
+        // count so a refresh never overshoots into a page the user did not load.
+        const entries = [...page.entries];
+        const unaddressable = [...page.unaddressable];
+        const seenEntries = new Set(entries.map(entry => entry.path));
+        const seenUnaddressable = new Set(unaddressable.map(entry => `${entry.kind}\u0000${entry.name}`));
+        const seenCursors = new Set<string>();
+        let nextCursor = page.nextCursor;
+        let total = page.total;
+        while (entries.length < targetEntries && nextCursor && !seenCursors.has(nextCursor)) {
+          seenCursors.add(nextCursor);
+          const limit = Math.max(1, Math.min(DIRECTORY_PAGE_MAX, targetEntries - entries.length));
+          const next = await requestListingPage(id, relative, nextCursor, limit);
+          if (!alive.current || ticket !== generation.current) return;
+          if (next.rootId !== page.rootId || next.path !== page.path) {
+            throw Object.assign(new Error('The listing response belongs to another directory.'), { code: 'INVALID_RESPONSE' });
+          }
+          total = next.total;
+          for (const entry of next.entries) {
+            if (seenEntries.has(entry.path)) continue;
+            seenEntries.add(entry.path);
+            entries.push(entry);
+          }
+          for (const entry of next.unaddressable) {
+            const key = `${entry.kind}\u0000${entry.name}`;
+            if (seenUnaddressable.has(key)) continue;
+            seenUnaddressable.add(key);
+            unaddressable.push(entry);
+          }
+          nextCursor = next.nextCursor;
+        }
+        page = { rootId: page.rootId, path: page.path, entries, total, nextCursor, unaddressable };
+      }
       setDirectory(relative);
       runtime.location = { rootId: id, path: relative };
       locationRef.current = { rootId: id, path: relative };
       commitListing(applyPage(listingRef.current, page, { append, cursor, generation: ticket }));
       if (!append) {
-        if (preserveSelection) setSelection(previous => previous.filter(filename => value.entries.some(entry => entry.path === filename)));
+        if (preserveSelection) setSelection(previous => previous.filter(filename => page.entries.some(entry => entry.path === filename)));
         else { setSelected(''); setSelection([]); }
       }
     } catch (failure) {

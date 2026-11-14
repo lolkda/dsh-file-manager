@@ -776,6 +776,58 @@ test('a removed target session cannot receive a queued file reference', async t 
   assert.equal(nodes(bridge, { 'data-fm-reference-status': 'blocked' }).length, 1);
 });
 
+test('a Host invalidation keeps pages already loaded by the user', { timeout: 10000 }, async t => {
+  const streams = [];
+  let listingReads = 0;
+  const view = await setup(t, {
+    // More than two Host pages: after the first append the view shows 400 rows,
+    // and a background reconciliation must not replace them with page one again.
+    seed: async root => {
+      await Promise.all(Array.from({ length: 401 }, (_, index) =>
+        writeFile(path.join(root, `entry-${String(index).padStart(3, '0')}.txt`), 'x')));
+    },
+    intercept: async (url, init, route) => {
+      if (url === '/api/file-manager/v2/events') {
+        const stream = { signal: init.signal, cancelled: false };
+        const body = new ReadableStream({ start(controller) { stream.controller = controller; }, cancel() { stream.cancelled = true; } });
+        streams.push(stream);
+        return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+      }
+      const response = await route(url, init);
+      if (init.body && JSON.parse(init.body).op === 'bootstrap') {
+        const result = await response.json();
+        result.value.capabilities.watch = true;
+        return new Response(JSON.stringify(result));
+      }
+      if (url === '/api/file-manager/v2/control' && init.body && JSON.parse(init.body).op === 'entries.list') listingReads += 1;
+      return response;
+    },
+  });
+  const entryPaths = () => view.renderer.root.findAll(element =>
+    typeof element.type === 'string' && typeof element.props['data-fm-path'] === 'string')
+    .map(element => element.props['data-fm-path']);
+  assert.equal(entryPaths().length, 200, 'the first page must render 200 rows');
+  await view.click({ 'data-fm-action': 'more' });
+  assert.equal(entryPaths().length, 400, 'the second page must append to the first');
+
+  const readsBeforeInvalidation = listingReads;
+  assert.ok(streams.at(-1), 'the panel never subscribed to Host events');
+  await act(async () => {
+    streams.at(-1).controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+      kind: 'invalidate', seq: 1, rootId: view.manager.getRoot().id, path: '', reason: 'watch',
+    })}\n\n`));
+  });
+  assert.equal(await view.waitFor(() => listingReads > readsBeforeInvalidation, { timeoutMs: 4000 }), true,
+    'the Host invalidation must re-read the directory');
+  await view.flush();
+
+  const after = entryPaths();
+  assert.equal(after.length, 400, 'a background reconciliation must not collapse the loaded pages back to 200 rows');
+  assert.equal(new Set(after).size, after.length, 'the preserved rows must not contain duplicates');
+  assert.equal(after.includes('entry-000.txt'), true, 'the refreshed first page must still be present');
+  assert.equal(after.includes('entry-398.txt'), true, 'the loaded second page must still be present');
+});
+
 test('a Host invalidation refreshes the directory while preserving an edited draft', { timeout: 5000 }, async t => {
   const streams = [];
   let observed;
