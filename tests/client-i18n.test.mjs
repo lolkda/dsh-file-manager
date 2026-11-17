@@ -80,7 +80,7 @@ test('the messages the view depends on are all present', async () => {
   assert.ok(en.emptyRoots && zh.emptyRoots, 'the no-browsable-root message stays: it is what a filesystem degradation renders');
   assert.ok(en.breadcrumbs && zh.breadcrumbs, 'the breadcrumb navigation label replaced the location label');
 
-  for (const removed of ['edit', 'expandViewer', 'restoreViewer', 'selectMode', 'exitSelection', 'selected', 'up']) {
+  for (const removed of ['edit', 'expandViewer', 'restoreViewer', 'selectMode', 'exitSelection', 'selected', 'up', 'bytes']) {
     assert.equal(en[removed], undefined, `${removed} must not retain an obsolete action label`);
     assert.equal(zh[removed], undefined, `${removed} must not retain an obsolete action label`);
   }

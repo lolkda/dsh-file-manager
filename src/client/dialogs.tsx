@@ -15,6 +15,7 @@
 
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { TaskConflictPolicy, UploadConflictPolicy } from '../contracts/limits.js';
+import { formatFileSize } from './file-size.js';
 
 /** The upload dialog also offers a local "rename to avoid the conflict" policy. */
 export type UploadPolicy = UploadConflictPolicy | 'rename';
@@ -331,7 +332,7 @@ export function UploadDialog({ t, ui, busy, errorText, error, transfers, plan, o
         setOpenPolicy(null);
         event.currentTarget.querySelector<HTMLButtonElement>(`button[data-fm-upload-policy="${openPolicy}"]`)?.focus();
       }}>
-        <p>{`${plan.sources.length} ${t('items')} · ${plan.sources.reduce((total, item) => total + (item.file?.size ?? 0), 0).toLocaleString()} ${t('bytes')}`}</p>
+        <p>{`${plan.sources.length} ${t('items')} · ${formatFileSize(plan.sources.reduce((total, item) => total + (item.file?.size ?? 0), 0))}`}</p>
         {plan.groups.map((group, index) => {
           // The policy set is the reviewed plan: `error` is the explicit
           // pre-conflict state of a name the destination does not have yet,

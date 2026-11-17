@@ -13,6 +13,7 @@
 
 import { type ReactNode, type RefObject } from 'react';
 import { ActionGroup } from './overlay.js';
+import { formatFileSize } from './file-size.js';
 import { absoluteEntryPath, pathCopyNotification, usePathCopy } from './path-copy.js';
 import type { EntrySnapshot, UnaddressableEntry } from '../contracts/protocol.js';
 import type { Translate } from './i18n.js';
@@ -267,7 +268,7 @@ export function FileSection(props: FileSectionProps): ReactNode {
             >
               {entry.kind === 'directory' ? <FolderIcon size={17} /> : <FileIcon />}
               <span className="fm-filename">{entry.name}</span>
-              {entry.kind === 'file' ? <span className="fm-size">{`${entry.size.toLocaleString()} ${t('bytes')}`}</span> : null}
+              {entry.kind === 'file' ? <span className="fm-size">{formatFileSize(entry.size)}</span> : null}
             </ui.Button>
           </div>
         ))}

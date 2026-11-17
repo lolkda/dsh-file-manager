@@ -18,6 +18,7 @@ import * as documents from './documents.js';
 import * as activity from './activity.js';
 import * as sse from './sse.js';
 import * as i18n from './i18n.js';
+import * as fileSize from './file-size.js';
 import * as editor from './code-editor.js';
 import * as codeLanguages from './code-languages.js';
 import * as notifications from './notifications.js';
@@ -32,7 +33,7 @@ import { Panel, type PanelRuntime } from './panel.js';
 import { ReferenceBridge, type ReferenceRecord, type ReferenceScope } from './reference.js';
 import primitives from '@deepseek-ai/dsh-client-ui-primitives';
 
-export { api, documents, activity, sse, i18n, editor, codeLanguages, notifications, notificationEvents };
+export { api, documents, activity, sse, i18n, fileSize, editor, codeLanguages, notifications, notificationEvents };
 export * as overlay from './overlay.js';
 // Named factories the component suites use directly, alongside the namespace
 // exports above. They expose no internal state — only the public constructors.
